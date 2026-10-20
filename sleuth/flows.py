@@ -40,7 +40,11 @@ def trades(records, pools, dead):
             net[e["from"]] -= e["value"]
             net[e["to"]] += e["value"]
         block = evs[0]["block"]
-        pool_delta = sum(v for a, v in net.items() if a in pools)
+        # Mints (from 0x0) are not trades: a launch tx mints supply into the bonding-curve market and then the launcher
+        # buys from it in the same tx. Remove minted amounts from the pool delta so that buy is seen as a buy.
+        minted_to_pool = sum(e["value"] for e in evs if e["from"] in dead and e["to"] in pools)
+        minted_to_wallet = {e["to"] for e in evs if e["from"] in dead and e["to"] not in pools}
+        pool_delta = sum(v for a, v in net.items() if a in pools) - minted_to_pool
         burned = sum(v for a, v in net.items() if a in dead and v > 0)
         wallets = {a: v for a, v in net.items() if a not in pools and a not in dead and v != 0}
         if burned:
@@ -63,7 +67,7 @@ def trades(records, pools, dead):
                 cp = receivers[0][0] if len(receivers) == 1 else f"{len(receivers)} recipients"
                 out.append(dict(tx=h, block=block, addr=a, kind="transfer_out", amount=v, counterparty=cp))
             for a, v in receivers:
-                cp = senders[0][0] if len(senders) == 1 else f"{len(senders)} senders"
+                cp = senders[0][0] if len(senders) == 1 else ("mint" if not senders and a in minted_to_wallet else f"{len(senders)} senders")
                 out.append(dict(tx=h, block=block, addr=a, kind="transfer_in", amount=v, counterparty=cp))
     return out
 

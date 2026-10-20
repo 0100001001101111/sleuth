@@ -43,3 +43,14 @@ def test_pool_detection_only_classifies_repeat_counterparties():
     pools, hits, kinds = flows.detect_pools(recs, lookup, known=(), min_txs=3)
     assert pools == {POOL} and set(asked) == {POOL}  # EOAs below the threshold never cost a getCode call
     assert hits[POOL] == 6
+
+
+def test_launch_and_buy_mint_is_not_a_sale():
+    # Real Pons launch tx (AMERICA 0xa9cf…): 1B minted 0x0 -> market, then market -> launcher 636M in the same tx.
+    # Netting without mint handling made the market look like it *received* 363M (a 'sell' by nobody) and lost the launcher's buy.
+    recs = [rec("0xl", 92995318, ZERO, MARKET, 1_000_000_000 * E, 0), rec("0xl", 92995318, MARKET, DEV, 636_363_636 * E, 6)]
+    tr = flows.trades(recs, {MARKET}, {DEAD, ZERO})
+    assert tr == [dict(tx="0xl", block=92995318, addr=DEV, kind="buy", amount=636_363_636 * E, counterparty="pool")]
+    # plain mint straight to a wallet is a transfer_in from 'mint', never a buy or sell
+    tr = flows.trades([rec("0xm", 1, ZERO, DEV, 5 * E)], {MARKET}, {DEAD, ZERO})
+    assert tr == [dict(tx="0xm", block=1, addr=DEV, kind="transfer_in", amount=5 * E, counterparty="mint")]
