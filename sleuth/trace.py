@@ -1,0 +1,200 @@
+"""Stage 2: focused connection tracing for specific wallets.
+
+Separate verdicts, never merged:
+  direct_tx_connection  - A sent value to B (or vice versa) in a transaction
+  shared_funding        - the same non-service address funded both
+  coordinated           - batch-funded siblings that bought the same token in the same block(s)
+  dev_connection        - any value path to the known developer / launcher set
+  ownership             - always 'unknown' from chain data alone
+Token moves come from RPC logs (fast); ETH funding / internal transfers need the explorer (slow, parallelised per wallet).
+"""
+import time
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from . import flows, onchain
+from .client import BudgetExceeded
+from .labels import classify, DEAD
+
+BATCH_MARKERS = ("batchtransfer", "disperse", "multisend", "multisender", "batch")
+
+
+def _ts(s):
+    return datetime.fromisoformat(s.replace("Z", "+00:00")).timestamp() if s else 0
+
+
+def _h(o):
+    return ((o or {}).get("hash") or "").lower()
+
+
+def _label(client, addr, cache):
+    a = addr.lower()
+    if a not in cache:
+        meta = client.address(addr)
+        cnt = client.counters(addr) if not meta.get("is_contract") else None
+        cache[a] = classify(meta, cnt, client.cfg) + (meta,)
+    return cache[a]
+
+
+def wallet(client, addr, token, dev_set, labels, pools, head, lo_block):
+    a = addr.lower()
+    kind, label, meta = _label(client, addr, labels)
+    r = {"addr": a, "kind": kind, "label": label, "token_acquisitions": [], "token_disposals": [],
+         "eth_funding": [], "batch_siblings": [], "proceeds_out": [], "dev_links": []}
+    ins = onchain.transfer_logs(client, token, lo_block, head["block"], to=a)
+    outs = onchain.transfer_logs(client, token, lo_block, head["block"], frm=a)
+    tx_hashes = list({x["tx"] for x in ins + outs})[:200]
+    if len({x["tx"] for x in ins + outs}) > 200:
+        r["gaps"] = [f"{len({x['tx'] for x in ins + outs})} token txs; only 200 classified"]
+    # Net every tx at receipt level so wallet -> router -> pool counts as one sell, router hops ignored
+    mine = {t["tx"]: t for t in flows.trades(onchain.tx_records(client, tx_hashes, token), pools, DEAD) if t["addr"] == a}
+    times, _ = onchain.block_times(client, [x["block"] for x in ins + outs])
+    seen = set()
+    for x in ins + outs:
+        if x["tx"] in seen:
+            continue
+        seen.add(x["tx"])
+        t = mine.get(x["tx"])
+        if not t:
+            continue
+        rec = {"ts": times.get(x["block"]), "block": x["block"], "amount": t["amount"], "tx": x["tx"]}
+        if t["kind"] in ("buy", "transfer_in"):
+            rec["from"] = t["counterparty"] if t["kind"] == "transfer_in" else None
+            rec["via"] = "pool (buy)" if t["kind"] == "buy" else "transfer"
+            if rec["from"] in dev_set:
+                r["dev_links"].append({"type": "token_from_dev", **rec})
+            r["token_acquisitions"].append(rec)
+        else:
+            rec["to"] = t["counterparty"] if t["kind"] == "transfer_out" else None
+            rec["via"] = {"sell": "pool (sell)", "burn": "burn"}.get(t["kind"], "transfer")
+            if rec["to"] in dev_set:
+                r["dev_links"].append({"type": "token_to_dev", **rec})
+            r["token_disposals"].append(rec)
+    first_acq = min((x["ts"] for x in r["token_acquisitions"] if x["ts"]), default=None)
+
+    # ETH funding: plain txs + internal transfers (batch distributions arrive as internal) -- explorer
+    txs, _ = client.paginate(f"/addresses/{addr}/transactions", max_pages=1)
+    its, _ = client.paginate(f"/addresses/{addr}/internal-transactions", max_pages=1)
+    for x in txs:
+        if _h(x.get("to")) == a and int(x.get("value") or 0) > 0 and x.get("status") == "ok":
+            r["eth_funding"].append({"ts": x["timestamp"], "from": _h(x.get("from")), "eth": int(x["value"]) / 1e18, "tx": x["hash"], "via": None})
+    for x in its:
+        if _h(x.get("to")) == a and int(x.get("value") or 0) > 0:
+            r["eth_funding"].append({"ts": x["timestamp"], "from": _h(x.get("from")), "eth": int(x["value"]) / 1e18,
+                                     "tx": x["transaction_hash"], "via": (x.get("from") or {}).get("name")})
+    r["eth_funding"].sort(key=lambda e: e["ts"])
+    for e in r["eth_funding"]:
+        k, lab, _m = _label(client, e["from"], labels)
+        e["from_kind"], e["from_label"] = k, lab
+        e["pre_acquisition"] = bool(first_acq and _ts(e["ts"]) <= first_acq)
+        if e["from"] in dev_set:
+            r["dev_links"].append({"type": "eth_from_dev", **e})
+    pre = [e for e in r["eth_funding"] if e["pre_acquisition"]]
+    r["funding_before_acquisition"] = pre[-1] if pre else None
+
+    # Batch distributions: internal funding via a batch contract -> enumerate every recipient
+    for e in (pre[-3:] if pre else r["eth_funding"][-2:]):
+        via = (e.get("via") or "").lower()
+        if any(m in via for m in BATCH_MARKERS):
+            ptx = client.tx(e["tx"])
+            sender = _h((ptx or {}).get("from"))
+            recips = [{"addr": _h(it.get("to")), "eth": int(it["value"]) / 1e18} for it in client.tx_internal(e["tx"])
+                      if int(it.get("value") or 0) > 0 and _h(it.get("to")) != a]
+            r["batch_siblings"].append({"tx": e["tx"], "ts": e["ts"], "sender": sender, "contract": e.get("via"),
+                                        "recipients": recips, "my_eth": e["eth"]})
+            if sender in dev_set:
+                r["dev_links"].append({"type": "batch_from_dev", "tx": e["tx"], "sender": sender})
+
+    # Sale proceeds (gross ETH received in sell txs) and where ETH went after the last sell
+    sell_txs = {x["tx"] for x in r["token_disposals"] if x["via"] == "pool (sell)"}
+    gross = sum(int(x.get("value") or 0) for x in its if x.get("transaction_hash") in sell_txs and _h(x.get("to")) == a)
+    r["gross_sale_proceeds_eth"] = round(gross / 1e18, 6)
+    last_sell = max((x["ts"] for x in r["token_disposals"] if x["via"] == "pool (sell)" and x["ts"]), default=None)
+    for x in txs:
+        if _h(x.get("from")) == a and int(x.get("value") or 0) > 0 and (not last_sell or _ts(x["timestamp"]) >= last_sell):
+            to = _h(x.get("to"))
+            k, lab, _m = _label(client, to, labels) if to else ("unknown", "?", {})
+            r["proceeds_out"].append({"ts": x["timestamp"], "to": to, "to_kind": k, "to_label": lab, "eth": int(x["value"]) / 1e18,
+                                      "tx": x["hash"], "method": x.get("method"), "resolved": k == "eoa"})
+            if to in dev_set:
+                r["dev_links"].append({"type": "eth_to_dev", "tx": x["hash"], "eth": int(x["value"]) / 1e18})
+    return r
+
+
+def group(client, addrs, token, dev_set, pools=(), lo_block=None):
+    t0 = time.monotonic()
+    labels = {}
+    dev_set = {d.lower() for d in dev_set}
+    pools = {p.lower() for p in pools}
+    head = client.head()
+    lo = lo_block or max(0, (head["block"] or 0) - 9_000_000)
+    traces, gaps = [], []
+    with ThreadPoolExecutor(max_workers=min(4, max(1, len(addrs)))) as ex:
+        futs = {ex.submit(wallet, client, a, token, dev_set, labels, pools, head, lo): a for a in addrs}
+        for f, a in futs.items():
+            try:
+                traces.append(f.result())
+            except BudgetExceeded:
+                gaps.append(f"budget exhausted before tracing {a}")
+            except Exception as e:  # noqa: BLE001 - one wallet failing must not lose the others
+                gaps.append(f"{a}: {type(e).__name__} {str(e)[:80]}")
+    traces.sort(key=lambda t: [x.lower() for x in addrs].index(t["addr"]))
+    for t in traces:
+        gaps.extend(f"{t['addr']}: {g}" for g in t.pop("gaps", []))
+    members = {a.lower() for a in addrs}  # requested wallets count as members even if their own trace ran out of budget
+
+    funders = defaultdict(set)
+    for t in traces:
+        for e in t["eth_funding"]:
+            if e["from_kind"] in ("eoa", "contract") and e["from"] not in members:
+                funders[e["from"]].add(t["addr"])
+    shared = [{"funder": f, "label": labels.get(f, ("", "", {}))[1], "members": sorted(m)} for f, m in funders.items() if len(m) > 1]
+    svc = defaultdict(set)
+    for t in traces:
+        for e in t["eth_funding"]:
+            if e["from_kind"] == "service":
+                svc[(e["from"], e["from_label"])].add(t["addr"])
+    service_only = [{"service": s, "label": l, "members": sorted(m)} for (s, l), m in svc.items() if len(m) > 1]
+
+    direct = []
+    for t in traces:
+        for e in t["eth_funding"]:
+            if e["from"] in members:
+                direct.append({"from": e["from"], "to": t["addr"], "eth": e["eth"], "tx": e["tx"]})
+        for b in t["batch_siblings"]:
+            if b["sender"] in members:
+                direct.append({"from": b["sender"], "to": t["addr"], "eth": b["my_eth"], "tx": b["tx"], "via": b["contract"]})
+        for x in t["token_acquisitions"]:
+            if x["from"] in members:
+                direct.append({"from": x["from"], "to": t["addr"], "token_amount": x["amount"], "tx": x["tx"]})
+
+    coord, seen_batches = [], set()
+    for t in traces:
+        for b in t["batch_siblings"]:
+            if b["tx"] in seen_batches:
+                continue
+            seen_batches.add(b["tx"])
+            sib = {r["addr"] for r in b["recipients"]} | {t["addr"]}
+            blocks = defaultdict(set)
+            for u in traces:
+                if u["addr"] in sib:
+                    for x in u["token_acquisitions"]:
+                        if x["via"] == "pool (buy)":
+                            blocks[x["block"]].add(u["addr"])
+            same = {bl: sorted(m) for bl, m in blocks.items() if len(m) > 1}
+            coord.append({"batch_tx": b["tx"], "sender": b["sender"], "siblings": sorted(sib), "same_block_buys": same,
+                          "untraced_siblings": sorted(sib - members),
+                          "amounts_eth": sorted({round(r["eth"], 9) for r in b["recipients"]} | {round(b["my_eth"], 9)})})
+    dev_links = [{"addr": t["addr"], **l} for t in traces for l in t["dev_links"]]
+    verdict = {
+        "direct_tx_connection": bool(direct),
+        "shared_funding": bool(shared),
+        "shared_service_only": sorted(service_only, key=lambda s: s["service"]),
+        "coordinated_trading": any(c["same_block_buys"] for c in coord),
+        "batch_funded": bool(coord),
+        "dev_connection": bool(dev_links),
+        "ownership": "unknown (chain data cannot prove a human owner)",
+    }
+    return {"stage": "trace", "chain_id": client.chain_id, "token": token, "head": head, "wallets": traces, "direct": direct,
+            "shared_funders": shared, "coordinated": coord, "dev_links": dev_links, "verdict": verdict, "gaps": gaps,
+            "requests": client.requests, "errors": client.errors[:10], "latency_s": round(time.monotonic() - t0, 2)}
