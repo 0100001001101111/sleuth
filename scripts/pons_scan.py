@@ -21,7 +21,8 @@ def scan_token(cl, L, head, known_pools):
     pools = set(known_pools) | {L["market"]}
     outs = onchain.transfer_logs(cl, tok, L["creation_block"], head["block"], frm=dev)
     ins = onchain.transfer_logs(cl, tok, L["creation_block"], head["block"], to=dev)
-    txs = list({x["tx"] for x in outs + ins})
+    txs = list(dict.fromkeys(x["tx"] for x in sorted(outs + ins, key=lambda x: (x["block"], x["idx"]))))
+    partial = len(txs) > 60  # metrics below are then lower bounds; triage the token for the full picture
     recs = onchain.tx_records(cl, txs[:60], tok)
     # a second liquidity venue (graduated pool) shows up as a contract receiving dev sells: detect by code
     cps = {r["to"] for r in recs if r["from"] == dev} | {r["from"] for r in recs if r["to"] == dev}
@@ -38,7 +39,7 @@ def scan_token(cl, L, head, known_pools):
             "dev_transferred_to_contracts_pct": pct(to_contracts), "dev_burned_pct": pct(agg.get("burned", 0)),
             "dev_balance_pct": pct(bal.get(dev) or 0), "market_balance_pct": pct(bal.get(L["market"]) or 0),
             "pool_balance_pct": pct(sum(v or 0 for a, v in bal.items() if a in pools and a != L["market"])),
-            "dev_token_txs": len(txs), "sell_txs": agg.get("txs", []), "rug_score": round((pct(sold) or 0) + (pct(out_w) or 0), 2)}
+            "dev_token_txs": len(txs), "partial": partial, "sell_txs": agg.get("txs", []), "rug_score": round((pct(sold) or 0) + (pct(out_w) or 0), 2)}
 
 
 def main():

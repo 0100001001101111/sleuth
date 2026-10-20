@@ -35,14 +35,27 @@ def test_burn_registry_is_not_a_seller():
 
 
 def test_pool_detection_only_classifies_repeat_counterparties():
-    recs = [rec(f"0x{i}", i, POOL, SIBS[i % 3], E) for i in range(6)] + [rec("0xz", 50, "0x" + "c" * 40, "0x" + "d" * 40, E)]
+    recs = [rec(f"0x{i}", i, POOL, SIBS[i % 3], E) for i in range(3)] + [rec(f"0x{i}", i, SIBS[i % 3], POOL, E) for i in range(3, 6)]
+    recs += [rec("0xz", 50, "0x" + "c" * 40, "0x" + "d" * 40, E)]
     asked = []
     def lookup(addrs):
         asked.extend(addrs)
         return {a: ("contract" if a == POOL else "eoa") for a in addrs}
     pools, hits, kinds = flows.detect_pools(recs, lookup, known=(), min_txs=3)
     assert pools == {POOL} and set(asked) == {POOL}  # EOAs below the threshold never cost a getCode call
-    assert hits[POOL] == 6
+    assert hits[POOL] == (3, 3)
+
+
+def test_one_directional_sink_is_not_a_pool_so_parking_tokens_is_not_a_sale():
+    """STOX 2026-10-19 21:04 PDT: launcher -> fee splitter 0xb1cd…6d4b -> 50% Staking 0x6c92…c931 / 50% 0xc0f2…219c.
+    No swap, no ETH out. Staking received in 6 txs from 3 wallets and sent in 2 txs: a sink, not a venue."""
+    STK, SPLIT = "0x6c92d274b33e0920add19644f2177d1708aac931", "0xb1cd15fa5ae39f4ebff19a55e2484ff7bb716d4b"
+    recs = [rec(f"0xs{i}", 10 + i, SIBS[i % 3], STK, E) for i in range(6)] + [rec(f"0xo{i}", 30 + i, STK, SIBS[i], E // 10) for i in range(2)]
+    recs += [rec("0xdev", 93160848, DEV, SPLIT, 8_889_617 * E), rec("0xdist", 93160861, SPLIT, STK, 4_444_808 * E)]
+    pools, hits, _ = flows.detect_pools(recs, lambda addrs: {a: "contract" for a in addrs}, known=(POOL,), min_txs=3)
+    assert STK not in pools and SPLIT not in pools and pools == {POOL}
+    tr = {(t["addr"], t["kind"]) for t in flows.trades(recs, pools, {DEAD})}
+    assert (SPLIT, "sell") not in tr and (SPLIT, "transfer_out") in tr and (DEV, "transfer_out") in tr
 
 
 def test_launch_and_buy_mint_is_not_a_sale():
@@ -54,3 +67,10 @@ def test_launch_and_buy_mint_is_not_a_sale():
     # plain mint straight to a wallet is a transfer_in from 'mint', never a buy or sell
     tr = flows.trades([rec("0xm", 1, ZERO, DEV, 5 * E)], {MARKET}, {DEAD, ZERO})
     assert tr == [dict(tx="0xm", block=1, addr=DEV, kind="transfer_in", amount=5 * E, counterparty="mint")]
+
+
+def test_fee_on_transfer_sale_splits_into_sale_and_burn():
+    w = SIBS[0]
+    recs = [rec("0xf", 7, w, POOL, 95 * E, 0), rec("0xf", 7, w, DEAD, 5 * E, 1)]
+    tr = sorted(flows.trades(recs, {POOL}, {DEAD}), key=lambda t: t["kind"])
+    assert [(t["kind"], t["amount"]) for t in tr] == [("burn", 5 * E), ("sell", 95 * E)]

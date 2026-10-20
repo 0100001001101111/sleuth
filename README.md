@@ -59,6 +59,23 @@ chains (explorer, RPC, timezone, known pools, launchpad events), HTTP timeouts/c
 | trace 4 batch-funded wallets | 95 s | 66 | explorer-bound (internal ETH); use `--budget 180` when Blockscout is slow |
 | burn tx check | 12 s | 4 | 8 s of it is the explorer method lookup |
 
+## Heuristics and known limits (read before quoting a verdict)
+
+* **Pool detection**: besides configured pools and the launch market, a contract counts as a venue only if it both
+  received and sent the token (net, ≥3 txs each way) in the window. Staking, lockers, fee splitters and distributors
+  are one-directional sinks: tokens moved there are reported as "transfer to contract", never as "sold".
+  A graduated pool that only saw sells in a short window is therefore under-claimed (shows as contract transfer) —
+  add it to `known_pools` or widen `--window`. `scripts/pons_scan.py` does not auto-promote detected contracts to pools.
+* **Verdicts are three-valued**: `true` = positive on-chain evidence; `false` = checked with complete evidence;
+  `null` / "unknown (incomplete)" = a wallet trace failed, >200 token txs were truncated, or the explorer page was
+  incomplete. "No link found" is never "independent".
+* **Funding vs proceeds**: ETH received inside a tx that also moved the token for that wallet is a swap output or
+  refund and is never counted as funding. Shared funding needs the same EOA (not a pool, router, bridge or contract)
+  funding >1 wallet before acquisition.
+* **Block ↔ time** mapping is ~50 blocks (~5 s) coarse; window edges are approximate and timestamps interpolated.
+* **RPC failures** are surfaced as gaps and `coverage.complete=false`; a failed `eth_getLogs` aborts rather than
+  reporting "no activity".
+
 ## RPC limits learned the hard way (Robinhood Chain, chain id 4663)
 
 * `eth_getLogs`: ≤10 M blocks per query, ≤10,000 logs per query (`launch.enumerate` halves its chunk on that error).
@@ -75,4 +92,5 @@ chains (explorer, RPC, timezone, known pools, launchpad events), HTTP timeouts/c
 
 The STOXPREPS case (token `0xb4d3…ef4d`, launcher `0x1d61…ff3c`, burn tx `0x3020…6cdb`, batch-funded group via
 `0xb102…9885`) is encoded in `tests/`: internal EIP-7702 burn, batch-funded siblings with same-block buys, false
-shared-service attribution, failed swaps, routed-transfer double counting, pool-candidate pre-filter.
+shared-service attribution, failed swaps, routed-transfer double counting, pool-candidate pre-filter, launch-and-buy
+mint, fee-on-transfer sale+burn split, incomplete evidence → "unknown", proceeds ≠ funding, staking sink ≠ pool.

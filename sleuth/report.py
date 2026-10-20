@@ -63,11 +63,9 @@ def trace(out, client):
     tz = client.chain.get("tz", "UTC")
     v = out["verdict"]
     L = []
-    heads = []
-    heads.append("direct tx link: " + ("YES" if v["direct_tx_connection"] else "no"))
-    heads.append("shared funder: " + ("YES" if v["shared_funding"] else "no"))
-    heads.append("coordinated buys: " + ("YES" if v["coordinated_trading"] else "no"))
-    heads.append("dev connection: " + ("YES" if v["dev_connection"] else "none found"))
+    yn = lambda x, no="no": "YES" if x else (no if x is False else "unknown (incomplete)")
+    heads = ["direct tx link: " + yn(v["direct_tx_connection"]), "shared funder: " + yn(v["shared_funding"]),
+             "coordinated buys: " + yn(v["coordinated_trading"]), "dev connection: " + yn(v["dev_connection"], "none found")]
     L.append("**" + " | ".join(heads) + ".** Ownership: unknown.")
     for d in out["direct"][:4]:
         what = f"{d.get('eth'):.4f} ETH" if d.get("eth") is not None else f"{d.get('token_amount', 0)/1e18:,.0f} tokens"

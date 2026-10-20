@@ -9,23 +9,25 @@ from collections import defaultdict
 
 
 def detect_pools(records, code_lookup, known=(), min_txs=3, max_cands=40):
-    """Pools = contracts whose net token delta is non-zero in >= min_txs distinct txs (liquidity sits there).
-    Only repeat counterparties are classified (code_lookup(addrs) -> {addr: eoa|contract|eoa7702|dead}), so a
-    6,000-transfer window costs one or two eth_getCode batches, not hundreds. Known pools always included."""
+    """Pools = contracts that both RECEIVE tokens (net, in >= min_txs txs) and SEND tokens (net, in >= min_txs txs):
+    a venue trades both ways. One-directional sinks (staking, lockers, fee splitters, distributors, burners) are NOT
+    pools, so tokens parked there are 'transfer to contract', never 'sold'. Only repeat counterparties are classified
+    (code_lookup(addrs) -> {addr: eoa|contract|eoa7702|dead}): a 6,000-transfer window costs one or two eth_getCode
+    batches. Known pools always included. Returns (pools, hits, kinds); hits[a] = (txs_received, txs_sent)."""
     per_tx = defaultdict(lambda: defaultdict(int))
     for r in records:
         per_tx[r["tx"]][r["from"]] -= r["value"]
         per_tx[r["tx"]][r["to"]] += r["value"]
-    hits = defaultdict(int)
+    hits = defaultdict(lambda: [0, 0])
     for net in per_tx.values():
         for a, v in net.items():
             if v:
-                hits[a] += 1
-    cands = sorted((a for a, n in hits.items() if n >= min_txs), key=lambda a: -hits[a])[:max_cands]
+                hits[a][0 if v > 0 else 1] += 1
+    cands = sorted((a for a, (i, o) in hits.items() if i >= min_txs and o >= min_txs), key=lambda a: -sum(hits[a]))[:max_cands]
     kinds = code_lookup(cands) if cands else {}
     pools = {a.lower() for a in known}
     pools |= {a for a in cands if kinds.get(a) == "contract"}
-    return pools, {a: hits[a] for a in cands}, kinds
+    return pools, {a: tuple(hits[a]) for a in cands}, kinds
 
 
 def trades(records, pools, dead):
@@ -48,9 +50,15 @@ def trades(records, pools, dead):
         burned = sum(v for a, v in net.items() if a in dead and v > 0)
         wallets = {a: v for a, v in net.items() if a not in pools and a not in dead and v != 0}
         if burned:
+            # Split each sender's outflow: the dead-address share is a burn, anything the pool absorbed is a sale.
+            total_out = sum(-v for v in wallets.values() if v < 0) or 1
             for a, v in wallets.items():
                 if v < 0:
-                    out.append(dict(tx=h, block=block, addr=a, kind="burn", amount=-v, counterparty="dead"))
+                    b = min(-v, burned * (-v) // total_out) if pool_delta > 0 else -v
+                    if b:
+                        out.append(dict(tx=h, block=block, addr=a, kind="burn", amount=b, counterparty="dead"))
+                    if pool_delta > 0 and -v - b > 0:
+                        out.append(dict(tx=h, block=block, addr=a, kind="sell", amount=-v - b, counterparty="pool"))
             continue
         if pool_delta > 0:
             for a, v in wallets.items():

@@ -10,7 +10,8 @@ Every command writes full JSON evidence to ~/sleuth/data/runs/ and prints a shor
 import argparse, json, re, sys, time
 from pathlib import Path
 from . import config as C, triage as T, trace as R, burn as B, contract as K, report
-from .client import Client, BudgetExceeded
+from .client import Client, BudgetExceeded, ApiError
+from .onchain import RpcError
 from .watchlist import Watchlist
 
 ADDR = re.compile(r"^0x[0-9a-fA-F]{40}$")
@@ -72,6 +73,8 @@ def main(argv=None):
                 out = T.run(cl, ns.token, _window(ns.window), _addrs(ns.track), _addrs(ns.dev))
             except BudgetExceeded:
                 raise SystemExit(f"budget {budget}s exhausted before first result; retry with --budget or smaller --window")
+            except (RpcError, ApiError) as e:
+                raise SystemExit(f"RPC failure, no result (NOT 'no activity'): {e}")
             text = report.triage(out, cl)
         elif ns.cmd == "trace":
             wl = Watchlist(cl.chain_id, ns.token)

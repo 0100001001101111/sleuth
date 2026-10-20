@@ -3,6 +3,10 @@ Measured on Robinhood Chain RPC: ~0.1-0.6s per call vs 2-10s per Blockscout page
 import time
 from .labels import DEAD
 
+class RpcError(Exception):
+    """An RPC call returned no result; callers must not treat that as 'no activity'."""
+
+
 TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 MAX_RANGE = 9_999_000
 
@@ -29,7 +33,9 @@ def transfer_logs(client, token, from_block, to_block, frm=None, to=None):
     while start <= to_block:
         end = min(to_block, start + MAX_RANGE)
         (res,) = client.rpc([("eth_getLogs", [{"fromBlock": hex(start), "toBlock": hex(end), "address": token, "topics": topics}])])
-        for lg in res or []:
+        if not isinstance(res, list):
+            raise RpcError(f"eth_getLogs {start}-{end} failed: {(client.errors or ['no result'])[-1]}")
+        for lg in res:
             tp = lg.get("topics") or []
             if len(tp) < 3:
                 continue
@@ -52,11 +58,13 @@ def block_times(client, blocks, exact_limit=40, anchors_n=20):
         return {}, False
     if len(bl) <= exact_limit:
         res = client.rpc([("eth_getBlockByNumber", [hex(b), False]) for b in bl])
-        return {b: (_int(r["timestamp"]) if r else None) for b, r in zip(bl, res)}, False
+        return {b: (_int(r["timestamp"]) if isinstance(r, dict) and r.get("timestamp") else None) for b, r in zip(bl, res)}, False
     step = max(1, (len(bl) - 1) // (anchors_n - 1))
     anchors = sorted(set(bl[::step] + [bl[-1]]))
     res = client.rpc([("eth_getBlockByNumber", [hex(b), False]) for b in anchors])
-    known = [(b, _int(r["timestamp"])) for b, r in zip(anchors, res) if r]
+    known = [(b, _int(r["timestamp"])) for b, r in zip(anchors, res) if isinstance(r, dict) and r.get("timestamp")]
+    if not known:
+        return {b: None for b in bl}, True
     out = {}
     j = 0
     for b in bl:
@@ -68,7 +76,8 @@ def block_times(client, blocks, exact_limit=40, anchors_n=20):
 
 
 def block_at_time(client, ts, head_block, head_ts, iters=4):
-    """Largest block with timestamp <= ts. Secant search using observed block rate (3-5 RPC calls)."""
+    """Approximate largest block with timestamp <= ts: secant search to within ~50 blocks (~5 s on this chain) using 3-5
+    RPC calls; beyond 200k blocks back it extrapolates from the observed rate. Callers report the window as block numbers."""
     lo_b, lo_t = max(0, head_block - 200_000), None
     lo_t = block_time(client, lo_b)
     if lo_t is None:
@@ -172,7 +181,8 @@ def tx_records(client, tx_hashes, token):
             need.append(h)
     res = client.rpc([("eth_getTransactionReceipt", [h]) for h in need])
     for h, rc in zip(need, res):
-        if not rc:
+        if not isinstance(rc, dict):
+            client.errors.append(f"rpc receipt missing: {h}")
             continue
         recs = []
         for lg in rc.get("logs") or []:
