@@ -35,7 +35,8 @@ def check_tx(client, tx_hash, token=None):
         out["total_supply_before"], out["total_supply_after"] = before, after
         if before is not None and after is not None:
             out["supply_reduced"] = after < before
-            out["burn_type"] = "supply-reducing burn" if after < before else "transfer to dead address (supply unchanged, tokens unrecoverable)"
+            out["burn_type"] = ("supply-reducing burn (block-level totalSupply comparison)" if after < before
+                                else "transfer to dead address (supply unchanged, tokens unrecoverable)")
         else:
             # Non-archive RPC: no historical state. Fall back to ERC-20 convention: _burn emits Transfer(from, 0x0)
             # and reduces totalSupply; a transfer to 0x...dEaD leaves totalSupply unchanged.

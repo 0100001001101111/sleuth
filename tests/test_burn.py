@@ -51,7 +51,7 @@ def test_zero_address_burn_inferred_supply_reducing_when_no_archive():
 def test_archive_supply_comparison_wins_over_inference():
     rc = {"from": DEV, "to": TOKEN, "status": "0x1", "blockNumber": hex(101), "logs": [_log(TOKEN, DEV, DEAD, 5 * E)]}
     out = burn.check_tx(FakeClient(rc, supply=(100 * E, 95 * E)), "0xzz", TOKEN)
-    assert out["supply_reduced"] is True and out["burn_type"] == "supply-reducing burn"
+    assert out["supply_reduced"] is True and out["burn_type"].startswith("supply-reducing burn (block-level")
 
 
 def test_no_burn_in_plain_transfer_tx():

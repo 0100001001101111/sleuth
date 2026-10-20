@@ -171,11 +171,11 @@ class Client:
             self._tokens = min(self.rpc_burst, self._tokens + (now - self._tokens_at) * self.rpc_rate)
             self._tokens_at = now
             wait = 0.0 if self._tokens >= n else (n - self._tokens) / self.rpc_rate
-            self._tokens -= n  # may go negative: later callers wait for it
-        if wait > 0:
             rem = self.remaining()
             if rem is not None and wait > rem:
-                raise BudgetExceeded()
+                raise BudgetExceeded()  # checked before reserving, so an aborted call never delays other threads
+            self._tokens -= n  # may go negative: later callers wait for it
+        if wait > 0:
             time.sleep(wait)
 
     def _rpc_once(self, calls):
@@ -207,6 +207,9 @@ class Client:
             break
         if res is None:
             return [None] * len(calls)
+        if not isinstance(res, list):
+            self.errors.append(f"rpc: unexpected envelope {str(res)[:60]}")
+            return [None] * len(calls)
         by = {x.get("id"): x for x in res if isinstance(x, dict)}
         out = []
         for i, (m, _) in enumerate(calls):
@@ -217,10 +220,18 @@ class Client:
         return out
 
     def head(self):
+        """Chain id + latest block. Raises ApiError if the RPC serves a different chain than configured (cache safety)."""
         cid, blk = self.rpc([("eth_chainId", []), ("eth_getBlockByNumber", ["latest", False])])
-        bn = int(blk["number"], 16) if blk else None
-        bt = int(blk["timestamp"], 16) if blk else None
-        return {"chain_id": int(cid, 16) if cid else None, "block": bn, "block_time": bt, "time": time.time()}
+        blk = blk if isinstance(blk, dict) else None
+        try:
+            chain_id = int(cid, 16) if cid else None
+            bn = int(blk["number"], 16) if blk else None
+            bt = int(blk["timestamp"], 16) if blk else None
+        except (TypeError, ValueError, KeyError) as e:
+            raise ApiError(f"malformed head response: {e}")
+        if chain_id is not None and str(chain_id) != str(self.chain_id):
+            raise ApiError(f"RPC {self.rpc_url} serves chain {chain_id}, config says {self.chain_id}; refusing (cache would be poisoned)")
+        return {"chain_id": chain_id, "block": bn, "block_time": bt, "time": time.time()}
 
     def total_supply(self, token, block="latest"):
         tag = block if isinstance(block, str) else hex(block)

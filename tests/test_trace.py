@@ -40,7 +40,7 @@ class FakeClient:
                                                   "0x" + f[2:].rjust(64, "0"), "0x" + t[2:].rjust(64, "0")], "data": hex(48_400_000 * E), "logIndex": hex(i)}
                     for i, (f, t) in enumerate(logs)]})
             elif m == "eth_getBlockByNumber":
-                out.append({"timestamp": hex(1760900000 + int(p[0], 16) - BUY_BLOCK)})
+                out.append({"timestamp": hex(1792460000 + int(p[0], 16) - BUY_BLOCK)})  # 2026-10-20 01:33Z, after the batch
             elif m == "eth_getCode":
                 out.append("0x6080" if p[0] in (POOL, ROUTER, BATCH) else "0x")
             else:
@@ -110,3 +110,29 @@ def test_dev_funding_is_reported_separately():
     out = trace.group(DevFunded(), SIBS[:1], TOKEN, {DEV}, pools={POOL})
     assert out["verdict"]["dev_connection"] is True
     assert out["dev_links"][0]["type"] == "eth_from_dev" and out["dev_links"][0]["tx"] == "0xdevfund"
+
+
+def test_incomplete_evidence_gives_unknown_not_no():
+    class Truncated(FakeClient):
+        def paginate(self, path, max_pages=1):
+            items, _ = super().paginate(path, max_pages)
+            return items, False  # explorer page incomplete
+    out = trace.group(Truncated(), SIBS[:2], TOKEN, {DEV}, pools={POOL})
+    v = out["verdict"]
+    assert v["complete"] is False and v["dev_connection"] is None and v["shared_funding"] is None
+    assert v["batch_funded"] is True  # positive evidence still stands
+    assert any("incomplete" in g for g in out["gaps"])
+
+
+def test_proceeds_inside_own_swap_are_not_funding():
+    class Proceeds(FakeClient):
+        def paginate(self, path, max_pages=1):
+            a = path.split("/")[2].lower()
+            if path.endswith("/internal-transactions") and a in SIBS:
+                return [{"transaction_hash": f"0xsell{a[-4:]}", "from": {"hash": POOL}, "to": {"hash": a}, "value": str(E),
+                         "timestamp": "2026-10-20T02:00:00.000000Z", "block_number": BUY_BLOCK + 500}], True
+            return super().paginate(path, max_pages)
+    out = trace.group(Proceeds(), SIBS[:2], TOKEN, {DEV}, pools={POOL})
+    for w in out["wallets"]:
+        assert w["eth_funding"] == [] and len(w["eth_in_own_token_txs"]) == 1
+    assert out["verdict"]["shared_funding"] is False and out["shared_funders"] == []

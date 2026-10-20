@@ -3,6 +3,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from . import flows, launch, onchain
 from .client import BudgetExceeded
+from .onchain import RpcError
 from .labels import DEAD
 from .watchlist import Watchlist
 
@@ -153,6 +154,7 @@ def _run(client, token, window_s, tracked, dev, top_n, from_block, t0, out):
     # --- top sellers: where did their tokens come from (RPC logs + receipts, full token history, routed hops netted) ---
     lo = li.get("creation_block") or max(0, head["block"] - 9_000_000)
     src_addrs = set()
+    own_txs = {s["addr"]: {t["tx"] for t in tr if t["addr"] == s["addr"]} for s in out["top_sellers"]}  # every window trade
     for s in out["top_sellers"]:
         a = s["addr"]
         try:
@@ -161,6 +163,10 @@ def _run(client, token, window_s, tracked, dev, top_n, from_block, t0, out):
         except BudgetExceeded:
             out["gaps"].append("budget hit before seller acquisition check")
             break
+        except RpcError as e:
+            out["gaps"].append(f"RPC failed during acquisition check of {a[:10]}: {e}")
+            continue
+        own_txs[a] |= {x["tx"] for x in ins}
         mine = [t for t in flows.trades(recs, pools, DEAD) if t["addr"] == a and t["kind"] in ("buy", "transfer_in")]
         srcs = {}
         for t in mine:
@@ -188,7 +194,7 @@ def _run(client, token, window_s, tracked, dev, top_n, from_block, t0, out):
             if fd is None:
                 s["eth_funders_internal"] = None
                 continue
-            own = set(s.get("acquisition_txs") or []) | set(s["sell_txs"])
+            own = own_txs.get(s["addr"], set())
             funders = []
             for x in (fd.get("items") or []):
                 if ((x.get("to") or {}).get("hash") or "").lower() != s["addr"] or int(x.get("value") or 0) <= 0:
@@ -208,6 +214,9 @@ def _run(client, token, window_s, tracked, dev, top_n, from_block, t0, out):
     else:
         out["gaps"].append("budget: ETH funding of top sellers not checked (run `trace`)")
 
+    if any(e.startswith("rpc") for e in client.errors):
+        out["coverage"]["complete"] = False
+        out["gaps"].append(f"{sum(e.startswith('rpc') for e in client.errors)} RPC call(s) failed; some receipts/timestamps may be missing")
     if tr:
         wl.data["last_block"] = max(t["block"] for t in tr)
     for s in out["top_sellers"]:
