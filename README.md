@@ -18,8 +18,9 @@ No wallets, no signing, no private keys. Nothing is written on chain.
 ## Install
 
 ```
+git clone https://github.com/0100001001101111/sleuth.git ~/sleuth && cd ~/sleuth
 pip install curl_cffi pytest   # curl_cffi is required: Blockscout sits behind Cloudflare TLS fingerprinting
-python3 -m pytest -q tests     # 14 regression tests, offline
+python3 -m pytest -q tests     # 19 regression tests, offline
 ```
 
 Python 3.11+. Optional `config.json` in `~/sleuth` (or `$SLEUTH_HOME`) overrides anything in `sleuth/config.py`:
