@@ -9,6 +9,9 @@ class RpcError(Exception):
 
 TRANSFER = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
 MAX_RANGE = 9_999_000
+LOG_CAP = 10_000
+_CAP_MARKERS = ("exceeds limit", "limit of 10000", "query returned more than", "response size exceed", "too many",
+                "block range", "are allowed", "timed out")
 
 
 def pad(addr):
@@ -24,26 +27,89 @@ def _int(h):
 
 
 def transfer_logs(client, token, from_block, to_block, frm=None, to=None):
-    """Normalized ERC-20 Transfer events: {tx, block, idx, from, to, value}. Only successful txs emit logs."""
+    """Normalized ERC-20 Transfer events: {tx, block, idx, from, to, value}, block-ordered. Only successful txs emit logs.
+    Splits ranges recursively on the node's 10k-log cap; a result AT the cap is treated as possibly truncated and split
+    too, because some providers truncate silently instead of erroring."""
     topics = [TRANSFER, pad(frm) if frm else None, pad(to) if to else None]
     while topics and topics[-1] is None:
         topics.pop()
     out = []
-    start = max(0, from_block)
-    while start <= to_block:
-        end = min(to_block, start + MAX_RANGE)
+    spans = [(max(0, from_block), to_block)]
+    while spans:
+        start, end = spans.pop()
+        if start > end:
+            continue
+        if end - start > MAX_RANGE:
+            mid = (start + end) // 2
+            spans += [(mid + 1, end), (start, mid)]
+            continue
+        n_err = len(client.errors)
         (res,) = client.rpc([("eth_getLogs", [{"fromBlock": hex(start), "toBlock": hex(end), "address": token, "topics": topics}])])
         if not isinstance(res, list):
-            raise RpcError(f"eth_getLogs {start}-{end} failed: {(client.errors or ['no result'])[-1]}")
+            err = "; ".join(client.errors[n_err:]) or "no result"
+            if end > start and any(m in err.lower() for m in _CAP_MARKERS):
+                mid = (start + end) // 2
+                spans += [(mid + 1, end), (start, mid)]
+                continue
+            raise RpcError(f"eth_getLogs {start}-{end} failed: {err}")
+        if len(res) >= LOG_CAP:
+            if end > start:
+                mid = (start + end) // 2
+                spans += [(mid + 1, end), (start, mid)]
+                continue
+            # a single block at the cap cannot be split: flag it so callers degrade coverage instead of
+            # silently accepting a possibly-truncated page
+            client.errors.append(f"rpc eth_getLogs: block {start} returned {LOG_CAP} logs (at cap, possibly truncated)")
         for lg in res:
             tp = lg.get("topics") or []
             if len(tp) < 3:
                 continue
             out.append({"tx": lg["transactionHash"], "block": _int(lg["blockNumber"]), "idx": _int(lg.get("logIndex")),
                         "from": topic_addr(tp[1]), "to": topic_addr(tp[2]), "value": _int(lg.get("data"))})
-        start = end + 1
     out.sort(key=lambda x: (x["block"], x["idx"]))
     return out
+
+
+def swap_evidence(client, addrs, spans, topics, chunk=99_000):
+    """Which addrs emitted any of the given swap topic0s near their token-activity span (spans: addr -> (min_block,
+    max_block)). At most 2 getLogs per addr, each <= chunk blocks: this node caps topic-filtered queries at 100k blocks.
+    Returns (confirmed, unresolved). Fail-closed: an RPC failure, or no configured topics, lands the addr in
+    `unresolved` -- never in a silent 'no evidence', which would let a sale at that venue read as a plain transfer."""
+    addrs = [a for a in addrs if spans.get(a)]
+    if not topics:
+        return set(), set(addrs)
+
+    def _pass(check, width):
+        calls, who = [], []
+        for a in check:
+            mn, mx = spans[a]
+            wins = [(mn, min(mx, mn + width))]
+            if mx > mn + width:
+                wins.append((max(mn, mx - width), mx))  # swaps co-occur with token flow: first + last activity chunks
+            for s, e in wins:
+                calls.append(("eth_getLogs", [{"fromBlock": hex(s), "toBlock": hex(e), "address": a, "topics": [topics]}]))
+                who.append(a)
+        res = client.rpc(calls)
+        conf, unres = set(), set()
+        for a, r in zip(who, res):
+            if isinstance(r, list):
+                if r:
+                    conf.add(a)
+            else:
+                unres.add(a)
+        # Two windows SAMPLE a span wider than 2*width -- clean empty samples are not proof of 'no swaps ever'
+        # (a swap in the omitted middle would make this a false sink), so an uncovered, unconfirmed addr stays unresolved.
+        sampled = {a for a in check if spans[a][1] - spans[a][0] > 2 * width}
+        return conf, (unres | sampled) - conf
+
+    confirmed, unresolved = _pass(addrs, chunk)
+    if unresolved:
+        # A busy venue FAILS the wide query (>10k matching logs, or timeout) -- the failure itself suggests heavy
+        # activity, so retry with tiny windows; the retry can only CONFIRM, never clear an addr to 'sink'.
+        conf2, _ = _pass(sorted(unresolved), 1_500)
+        confirmed |= conf2
+        unresolved -= conf2
+    return confirmed, unresolved
 
 
 def block_time(client, block):
@@ -167,16 +233,19 @@ def erc20_meta(client, token):
     return v
 
 
-def tx_records(client, tx_hashes, token):
-    """Normalized Transfer records of `token` for the given txs, via batched eth_getTransactionReceipt.
-    Lets routed hops (wallet -> router -> pool) be netted per tx. Receipts are immutable: cached."""
+def tx_records_full(client, tx_hashes, token):
+    """(records, topics) via batched eth_getTransactionReceipt: `records` are `token`'s normalized Transfer records
+    (lets routed hops wallet -> router -> pool be netted per tx); `topics` maps tx -> {topic0: sorted emitter
+    addresses}, so callers can check swap-event evidence AND which contract emitted it (a swap of an unrelated token
+    elsewhere in a multicall must not confirm this token's outflow as a sale). Receipts are immutable: cached."""
     token = token.lower()
     hs = list(dict.fromkeys(tx_hashes))
-    out, need = [], []
+    out, topics, need = [], {}, []
     for h in hs:
-        v, _ = client.cache.get(f"rcpt:{client.chain_id}:{token}:{h}") if client.cache else (None, None)
-        if v is not None:
-            out.extend(v)
+        v, _ = client.cache.get(f"rcpt3:{client.chain_id}:{token}:{h}") if client.cache else (None, None)
+        if isinstance(v, dict):
+            out.extend(v["recs"])
+            topics[h] = v["topics"]
         else:
             need.append(h)
     res = client.rpc([("eth_getTransactionReceipt", [h]) for h in need])
@@ -184,14 +253,23 @@ def tx_records(client, tx_hashes, token):
         if not isinstance(rc, dict):
             client.errors.append(f"rpc receipt missing: {h}")
             continue
-        recs = []
+        recs, tops = [], {}
         for lg in rc.get("logs") or []:
             tp = lg.get("topics") or []
+            if tp:
+                tops.setdefault(tp[0], set()).add((lg.get("address") or "").lower())
             if (lg.get("address") or "").lower() != token or len(tp) != 3 or tp[0] != TRANSFER:
                 continue
             recs.append({"tx": h, "block": _int(rc.get("blockNumber")), "idx": _int(lg.get("logIndex")),
                          "from": topic_addr(tp[1]), "to": topic_addr(tp[2]), "value": _int(lg.get("data"))})
+        tops = {k: sorted(v) for k, v in tops.items()}
         if client.cache:
-            client.cache.put(f"rcpt:{client.chain_id}:{token}:{h}", recs, client.chain_id, _int(rc.get("blockNumber")))
+            client.cache.put(f"rcpt3:{client.chain_id}:{token}:{h}", {"recs": recs, "topics": tops}, client.chain_id, _int(rc.get("blockNumber")))
         out.extend(recs)
-    return out
+        topics[h] = tops
+    return out, topics
+
+
+def tx_records(client, tx_hashes, token):
+    """Normalized Transfer records of `token` for the given txs (see tx_records_full)."""
+    return tx_records_full(client, tx_hashes, token)[0]
