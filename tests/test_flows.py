@@ -74,3 +74,66 @@ def test_fee_on_transfer_sale_splits_into_sale_and_burn():
     recs = [rec("0xf", 7, w, POOL, 95 * E, 0), rec("0xf", 7, w, DEAD, 5 * E, 1)]
     tr = sorted(flows.trades(recs, {POOL}, {DEAD}), key=lambda t: t["kind"])
     assert [(t["kind"], t["amount"]) for t in tr] == [("burn", 5 * E), ("sell", 95 * E)]
+
+
+def test_two_pool_routing_does_not_cancel_the_sale():
+    # One tx routes through TWO venues: seller -> POOL 100 while MARKET pays 100 out to a buyer.
+    # Summing pool deltas nets to zero and hides both the sale and the buy; per-pool netting must not.
+    seller, buyer = SIBS[0], SIBS[1]
+    recs = [rec("0x2p", 10, seller, POOL, 100 * E, 0), rec("0x2p", 10, MARKET, buyer, 100 * E, 1)]
+    tr = {(t["addr"], t["kind"], t["amount"]) for t in flows.trades(recs, {POOL, MARKET}, {DEAD})}
+    assert (seller, "sell", 100 * E) in tr
+    assert (buyer, "buy", 100 * E) in tr
+
+
+def test_dust_second_sender_does_not_erase_dev_attribution():
+    # DEV sends 100 and an unrelated wallet sends 1 wei of dust in the same tx: the main counterparty must
+    # stay DEV and the raw edge list must still name both senders.
+    w = SIBS[2]
+    recs = [rec("0xd", 11, DEV, w, 100 * E, 0), rec("0xd", 11, SIBS[1], w, 1, 1)]
+    (t,) = [t for t in flows.trades(recs, {POOL}, {DEAD}) if t["addr"] == w]
+    assert t["kind"] == "transfer_in" and t["counterparty"] == DEV
+    assert t["counterparties"] == [DEV, SIBS[1]]
+
+
+def test_burn_is_not_apportioned_across_an_unrelated_seller():
+    # A sells 100 into the pool; B burns 5 directly, same tx. The 5 must land on B alone --
+    # proportional splitting would turn A into a part-burner and shrink the reported sale.
+    a, b = SIBS[0], SIBS[1]
+    recs = [rec("0xmix", 12, a, POOL, 100 * E, 0), rec("0xmix", 12, b, DEAD, 5 * E, 1)]
+    tr = {(t["addr"], t["kind"], t["amount"]) for t in flows.trades(recs, {POOL}, {DEAD})}
+    assert tr == {(a, "sell", 100 * E), (b, "burn", 5 * E)}
+
+
+def test_ambiguous_routed_burn_does_not_turn_the_burner_into_a_seller():
+    # A sells 5 into the pool; B routes 5 through a burner to dead in the SAME tx, same amount. Exact-amount
+    # matching alone is ambiguous (both candidates), but B's edge to the zero-netting burner attributes the burn.
+    a, b = SIBS[0], SIBS[1]
+    recs = [rec("0xab", 13, a, POOL, 5 * E, 0),
+            rec("0xab", 13, b, BURNER, 5 * E, 1), rec("0xab", 13, BURNER, DEAD, 5 * E, 2)]
+    tr = {(t["addr"], t["kind"], t["amount"]) for t in flows.trades(recs, {POOL}, {DEAD})}
+    assert tr == {(a, "sell", 5 * E), (b, "burn", 5 * E)}
+
+
+def test_unrelated_transfer_in_a_pool_tx_is_not_a_sale():
+    # One multicall bundles Alice -> friend (no path to any pool) with Bob -> pool. Tx-global pool attribution
+    # would call Alice a seller; edge reachability must not.
+    alice, friend, bob = SIBS[0], SIBS[1], SIBS[2]
+    recs = [rec("0xmc", 14, alice, friend, 100 * E, 0), rec("0xmc", 14, bob, POOL, 50 * E, 1)]
+    kinds = {t["addr"]: t["kind"] for t in flows.trades(recs, {POOL}, {DEAD})}
+    assert kinds[bob] == "sell"
+    assert kinds[alice] == "transfer_out"
+    assert kinds[friend] == "transfer_in"  # not a 'buy': no edge path from a pool
+    # the routed form still reaches the pool: wallet -> router -> pool stays a sell
+    recs = [rec("0xrt", 15, alice, ROUTER, 7 * E, 0), rec("0xrt", 15, ROUTER, POOL, 7 * E, 1)]
+    assert [(t["addr"], t["kind"]) for t in flows.trades(recs, {POOL}, {DEAD})] == [(alice, "sell")]
+
+
+def test_one_way_contract_becomes_pool_only_with_swap_evidence():
+    STK = "0x6c92d274b33e0920add19644f2177d1708aac931"
+    recs = [rec(f"0xw{i}", 20 + i, SIBS[i % 3], STK, E) for i in range(4)]  # one-way inflow sink
+    lookup = lambda addrs: {a: "contract" for a in addrs}
+    pools, _, _ = flows.detect_pools(recs, lookup, known=(), min_txs=3, swap_check=lambda addrs: set())
+    assert STK not in pools  # no swap events -> still a sink
+    pools, _, _ = flows.detect_pools(recs, lookup, known=(), min_txs=3, swap_check=lambda addrs: {STK})
+    assert STK in pools  # independent swap-event evidence upgrades it to a venue

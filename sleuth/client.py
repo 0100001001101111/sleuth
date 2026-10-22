@@ -87,6 +87,15 @@ class Client:
         if r is not None and r <= 0:
             raise BudgetExceeded()
 
+    def _nap(self, s):
+        """Deadline-aware sleep for retry backoff: never sleeps past the budget."""
+        rem = self.remaining()
+        if rem is not None:
+            if rem <= 0:
+                raise BudgetExceeded()
+            s = min(s, rem)
+        time.sleep(s)
+
     def _count(self):
         with self._lock:
             self.requests += 1
@@ -101,17 +110,17 @@ class Client:
             try:
                 rem = self.remaining()
                 t = timeout or self.h["timeout"]
-                t = t if rem is None else min(t, max(2, rem))
+                t = t if rem is None else min(t, max(0.5, rem))
                 r = self._sess().get(url, params=params, timeout=t)
                 if r.status_code == 404 and soft:
                     return None
                 if r.status_code == 429:
                     last = ApiError("429 rate limited")
-                    time.sleep(1.5 * (attempt + 1))
+                    self._nap(1.5 * (attempt + 1))
                     continue
                 if r.status_code >= 500:
                     last = ApiError(f"{r.status_code} {r.text[:80]}")
-                    time.sleep(0.5)
+                    self._nap(0.5)
                     continue
                 d = r.json()
                 if not isinstance(d, (dict, list)):
@@ -120,7 +129,7 @@ class Client:
                 return d
             except (_rq.RequestsError, ValueError) as e:
                 last = ApiError(str(e)[:120])
-                time.sleep(0.3)
+                self._nap(0.3)
         if soft:
             self.errors.append(f"{path}: {last}")
             return None
@@ -187,22 +196,22 @@ class Client:
             self._throttle(len(calls))
             try:
                 rem = self.remaining()
-                t = self.h["timeout"] if rem is None else min(self.h["timeout"], max(2, rem))
+                t = self.h["timeout"] if rem is None else min(self.h["timeout"], max(0.5, rem))
                 r = self._sess().post(self.rpc_url, json=body, timeout=t)
                 if r.status_code == 429:
                     self.errors.append("rpc: HTTP 429")
-                    time.sleep(2.0 * (attempt + 1))
+                    self._nap(2.0 * (attempt + 1))
                     continue
                 res = r.json()
             except (_rq.RequestsError, ValueError) as e:
                 self.errors.append(f"rpc: {str(e)[:100]}")
-                time.sleep(0.3)
+                self._nap(0.3)
                 continue
             if isinstance(res, dict):
                 res = [res]
             if any("Too Many Requests" in str((x.get("error") or {}).get("message", "")) for x in res if isinstance(x, dict)):
                 self.errors.append("rpc: Too Many Requests")
-                time.sleep(2.0 * (attempt + 1))
+                self._nap(2.0 * (attempt + 1))
                 continue
             break
         if res is None:

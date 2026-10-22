@@ -43,13 +43,21 @@ def wallet(client, addr, token, dev_set, labels, pools, head, lo_block):
          "eth_funding": [], "eth_in_own_token_txs": [], "batch_siblings": [], "proceeds_out": [], "dev_links": [], "complete": True}
     ins = onchain.transfer_logs(client, token, lo_block, head["block"], to=a)
     outs = onchain.transfer_logs(client, token, lo_block, head["block"], frm=a)
-    tx_hashes = list({x["tx"] for x in ins + outs})[:200]
-    if len({x["tx"] for x in ins + outs}) > 200:
-        r["gaps"] = [f"{len({x['tx'] for x in ins + outs})} token txs; only 200 classified"]
+    ordered = sorted(ins + outs, key=lambda x: (x["block"], x["idx"]))
+    tx_hashes = list(dict.fromkeys(x["tx"] for x in ordered))  # block-ordered, deterministic
+    if len(tx_hashes) > 200:
+        r["gaps"] = [f"{len(tx_hashes)} token txs; only the first 200 (block-ordered) classified"]
         r["complete"] = False
+        tx_hashes = tx_hashes[:200]
     own_txs = {x["tx"] for x in ins + outs}  # every tx that moved this token for the wallet: ETH received inside = proceeds/refund
     # Net every tx at receipt level so wallet -> router -> pool counts as one sell, router hops ignored
-    mine = {t["tx"]: t for t in flows.trades(onchain.tx_records(client, tx_hashes, token), pools, DEAD) if t["addr"] == a}
+    n_err = len(client.errors)
+    recs = onchain.tx_records(client, tx_hashes, token)
+    lost = sum(1 for e in client.errors[n_err:] if e.startswith("rpc receipt missing"))
+    if lost:
+        r["complete"] = False
+        r.setdefault("gaps", []).append(f"{lost} receipt(s) unavailable: token classification incomplete")
+    mine = {t["tx"]: t for t in flows.trades(recs, pools, DEAD) if t["addr"] == a}
     times, _ = onchain.block_times(client, [x["block"] for x in ins + outs])
     seen = set()
     for x in ins + outs:
@@ -60,16 +68,23 @@ def wallet(client, addr, token, dev_set, labels, pools, head, lo_block):
         if not t:
             continue
         rec = {"ts": times.get(x["block"]), "block": x["block"], "amount": t["amount"], "tx": x["tx"]}
+        # `counterparties` holds every direct edge party: a dust input from a second wallet must not erase a dev link
         if t["kind"] in ("buy", "transfer_in"):
             rec["from"] = t["counterparty"] if t["kind"] == "transfer_in" else None
             rec["via"] = "pool (buy)" if t["kind"] == "buy" else "transfer"
-            if rec["from"] in dev_set:
+            froms = set(t.get("counterparties") or ([rec["from"]] if rec["from"] else []))
+            if len(froms) > 1:
+                rec["from_all"] = sorted(froms)
+            if froms & dev_set:
                 r["dev_links"].append({"type": "token_from_dev", **rec})
             r["token_acquisitions"].append(rec)
         else:
             rec["to"] = t["counterparty"] if t["kind"] == "transfer_out" else None
             rec["via"] = {"sell": "pool (sell)", "burn": "burn"}.get(t["kind"], "transfer")
-            if rec["to"] in dev_set:
+            tos = set(t.get("counterparties") or ([rec["to"]] if rec["to"] else []))
+            if len(tos) > 1:
+                rec["to_all"] = sorted(tos)
+            if tos & dev_set:
                 r["dev_links"].append({"type": "token_to_dev", **rec})
             r["token_disposals"].append(rec)
     first_acq = min((x["ts"] for x in r["token_acquisitions"] if x["ts"]), default=None)
@@ -87,7 +102,7 @@ def wallet(client, addr, token, dev_set, labels, pools, head, lo_block):
     for x in its:
         if _h(x.get("to")) == a and int(x.get("value") or 0) > 0 and not x.get("error") and x.get("success", True):
             e = {"ts": x["timestamp"], "from": _h(x.get("from")), "eth": int(x["value"]) / 1e18,
-                 "tx": x["transaction_hash"], "via": (x.get("from") or {}).get("name")}
+                 "tx": x["transaction_hash"], "via": (x.get("from") or {}).get("name"), "internal": True}
             (r["eth_in_own_token_txs"] if x["transaction_hash"] in own_txs else r["eth_funding"]).append(e)
     r["eth_funding"].sort(key=lambda e: e["ts"])
     for e in r["eth_funding"]:
@@ -99,14 +114,19 @@ def wallet(client, addr, token, dev_set, labels, pools, head, lo_block):
     pre = [e for e in r["eth_funding"] if e["pre_acquisition"]]
     r["funding_before_acquisition"] = pre[-1] if pre else None
 
-    # Batch distributions: internal funding via a batch contract -> enumerate every recipient
+    # Batch distributions: internal funding via a batch contract -> enumerate every recipient. A fresh UNVERIFIED
+    # contract has no name to match, so unnamed internal distributors are enumerated too and count as a batch
+    # when the same tx paid out to other recipients (name matching alone is trivially evaded).
     for e in (pre[-3:] if pre else r["eth_funding"][-2:]):
         via = (e.get("via") or "").lower()
-        if any(m in via for m in BATCH_MARKERS):
+        named_batch = any(m in via for m in BATCH_MARKERS)
+        if named_batch or (e.get("internal") and not via):
             ptx = client.tx(e["tx"])
             sender = _h((ptx or {}).get("from"))
             recips = [{"addr": _h(it.get("to")), "eth": int(it["value"]) / 1e18} for it in client.tx_internal(e["tx"])
                       if int(it.get("value") or 0) > 0 and _h(it.get("to")) != a and not it.get("error") and it.get("success", True)]
+            if not named_batch and len(recips) < 2:
+                continue
             r["batch_siblings"].append({"tx": e["tx"], "ts": e["ts"], "sender": sender, "contract": e.get("via"),
                                         "recipients": recips, "my_eth": e["eth"]})
             if sender in dev_set:
@@ -161,6 +181,14 @@ def group(client, addrs, token, dev_set, pools=(), lo_block=None):
             if e["from_kind"] == "eoa" and e["pre_acquisition"] and e["from"] not in members and e["from"] not in pools:
                 funders[e["from"]].add(t["addr"])
     shared = [{"funder": f, "label": labels.get(f, ("", "", {}))[1], "members": sorted(m)} for f, m in funders.items() if len(m) > 1]
+    # A common funder whose kind could not be resolved (explorer miss) may still be a shared wallet:
+    # it must make the negative verdict unknown, never silently drop out of both buckets.
+    unclassified = defaultdict(set)
+    for t in traces:
+        for e in t["eth_funding"]:
+            if e["from_kind"] == "unknown" and e["pre_acquisition"] and e["from"] not in members:
+                unclassified[e["from"]].add(t["addr"])
+    shared_unclassified = [{"funder": f, "members": sorted(m)} for f, m in unclassified.items() if len(m) > 1]
     svc = defaultdict(set)
     for t in traces:
         for e in t["eth_funding"]:
@@ -177,8 +205,9 @@ def group(client, addrs, token, dev_set, pools=(), lo_block=None):
             if b["sender"] in members:
                 direct.append({"from": b["sender"], "to": t["addr"], "eth": b["my_eth"], "tx": b["tx"], "via": b["contract"]})
         for x in t["token_acquisitions"]:
-            if x["from"] in members:
-                direct.append({"from": x["from"], "to": t["addr"], "token_amount": x["amount"], "tx": x["tx"]})
+            for f in (x.get("from_all") or ([x["from"]] if x.get("from") else [])):
+                if f in members:
+                    direct.append({"from": f, "to": t["addr"], "token_amount": x["amount"], "tx": x["tx"]})
 
     coord, seen_batches = [], set()
     for t in traces:
@@ -202,7 +231,8 @@ def group(client, addrs, token, dev_set, pools=(), lo_block=None):
     neg = False if not incomplete else None
     verdict = {
         "direct_tx_connection": bool(direct) or neg,
-        "shared_funding": bool(shared) or neg,
+        "shared_funding": bool(shared) or (None if shared_unclassified else neg),
+        "shared_funder_unclassified": shared_unclassified,
         "shared_service_only": sorted(service_only, key=lambda s: s["service"]),
         "coordinated_trading": any(c["same_block_buys"] for c in coord) or neg,
         "batch_funded": bool(coord) or neg,
@@ -210,8 +240,15 @@ def group(client, addrs, token, dev_set, pools=(), lo_block=None):
         "complete": not incomplete,
         "ownership": "unknown (chain data cannot prove a human owner)",
     }
+    if shared_unclassified:
+        gaps.append(f"{len(shared_unclassified)} common funder(s) unresolved (explorer miss): shared_funding is 'unknown' until classified")
     if incomplete:
         gaps.append("evidence incomplete: negative verdicts are 'unknown', not 'no'")
-    return {"stage": "trace", "chain_id": client.chain_id, "token": token, "head": head, "wallets": traces, "direct": direct,
+    try:
+        token_meta = onchain.erc20_meta(client, token)
+    except Exception:  # noqa: BLE001 - decimals are presentation only, never block the verdict
+        token_meta = None
+    return {"stage": "trace", "chain_id": client.chain_id, "token": token, "head": head, "token_meta": token_meta,
+            "wallets": traces, "direct": direct,
             "shared_funders": shared, "coordinated": coord, "dev_links": dev_links, "verdict": verdict, "gaps": gaps,
             "requests": client.requests, "errors": client.errors[:10], "latency_s": round(time.monotonic() - t0, 2)}
