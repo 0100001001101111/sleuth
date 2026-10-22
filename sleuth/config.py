@@ -20,6 +20,11 @@ DEFAULT = {
                 "address": "0xe33e9e479df8802cb0866d5d05258bec4cf62948",
                 "topic": "0xdcacba5e347ae7abd91cb519eb877af8fa7774e347b85dd3ddcd24a2ba8cdf37",
                 "token_topic": 1, "market_topic": 2, "launcher_topic": 3,
+            }, {
+                "name": "Pons V2 launcher (0x7ed598bc, found via GH0ST 2026-10-22)",
+                "address": "0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e",
+                "topic": "0x8d4aad4953d0ca700d468f3753aa14432d1b35b43ec6409f051fb6aa43a89607",
+                "token_topic": 1, "market_topic": 2, "launcher_topic": 3,
             }],
         }
     },
