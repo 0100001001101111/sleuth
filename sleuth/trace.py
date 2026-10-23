@@ -16,7 +16,7 @@ from . import flows, onchain
 from .client import BudgetExceeded
 from .labels import classify, DEAD
 
-BATCH_MARKERS = ("batchtransfer", "disperse", "multisend", "multisender", "batch")
+BATCH_MARKERS = ("batchtransfer", "disperse", "multisend", "multisender", "batch", "gaslite", "airdrop")
 
 
 def _ts(s):
@@ -43,6 +43,12 @@ def wallet(client, addr, token, dev_set, labels, pools, head, lo_block):
          "eth_funding": [], "eth_in_own_token_txs": [], "batch_siblings": [], "proceeds_out": [], "dev_links": [], "complete": True}
     ins = onchain.transfer_logs(client, token, lo_block, head["block"], to=a)
     outs = onchain.transfer_logs(client, token, lo_block, head["block"], frm=a)
+    if not ins and not outs:
+        # A traced wallet with ZERO token activity over the whole range is nearly always a mistyped address
+        # (two garbled addresses produced hollow "sold 0, complete" traces on V4M, 2026-10-22). The result is
+        # still complete — the chain genuinely has nothing — but the reader must be told to double-check.
+        r.setdefault("gaps", []).append(f"ZERO transfers of this token for this wallet (blocks {lo_block}-{head['block']}): "
+                                        "verify the address — a typo traces clean")
     ordered = sorted(ins + outs, key=lambda x: (x["block"], x["idx"]))
     tx_hashes = list(dict.fromkeys(x["tx"] for x in ordered))  # block-ordered, deterministic
     if len(tx_hashes) > 200:
@@ -196,6 +202,21 @@ def group(client, addrs, token, dev_set, pools=(), lo_block=None):
                 svc[(e["from"], e["from_label"] if e["from_kind"] == "service" else f"{e['from_label']} (contract)")].add(t["addr"])
     service_only = [{"service": s, "label": l, "members": sorted(m)} for (s, l), m in svc.items() if len(m) > 1]
 
+    # Bot controller: an unnamed/unverified contract that both funded a member pre-buy AND received its sale
+    # proceeds is one operator cycling throwaway wallets through a hub (V4M 0x9247…528b). Restricted to kind
+    # 'contract': a named service (bridge, router) shows the same two-way shape when a user merely bridges in
+    # and out, and must not be accused.
+    ctrl = defaultdict(set)
+    for t in traces:
+        if not any(d["via"] == "pool (sell)" for d in t["token_disposals"]):
+            continue  # without a sell, post-"sell" outflows are just outflows: WETH wraps etc. must not accuse
+        fin = {e["from"] for e in t["eth_funding"] if e["pre_acquisition"] and e["from_kind"] == "contract" and e["from"] not in pools}
+        pout = {p["to"] for p in t["proceeds_out"] if p["to"] and p["to_kind"] == "contract" and p["to"] not in pools}
+        for c in fin & pout:
+            ctrl[c].add(t["addr"])
+    bot_controllers = [{"contract": c, "label": labels.get(c, ("", "contract", {}))[1], "members": sorted(m)}
+                       for c, m in sorted(ctrl.items(), key=lambda kv: (-len(kv[1]), kv[0]))]
+
     direct = []
     for t in traces:
         # a wallet moving ETH/tokens to ITSELF is not a member-to-member connection: self rows here made
@@ -236,6 +257,8 @@ def group(client, addrs, token, dev_set, pools=(), lo_block=None):
         "shared_funding": bool(shared) or (None if shared_unclassified else neg),
         "shared_funder_unclassified": shared_unclassified,
         "shared_service_only": sorted(service_only, key=lambda s: s["service"]),
+        # three-valued like every verdict: positives stand, but an empty list on incomplete evidence is unknown
+        "bot_controller": bot_controllers if (bot_controllers or not incomplete) else None,
         "coordinated_trading": any(c["same_block_buys"] for c in coord) or neg,
         "batch_funded": bool(coord) or neg,
         "dev_connection": bool(dev_links) or neg,

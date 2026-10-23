@@ -1,7 +1,7 @@
 """Stage 1: urgent triage, RPC-first. Target: first useful result in <=20s even when the explorer is slow."""
 import time
 from concurrent.futures import ThreadPoolExecutor
-from . import flows, launch, onchain
+from . import devprofile, flows, launch, onchain
 from .client import BudgetExceeded
 from .onchain import RpcError
 from .labels import DEAD
@@ -217,6 +217,17 @@ def _run(client, token, window_s, tracked, dev, top_n, from_block, t0, out):
     recip_set = _recip_set(wl) - dev_set
     out["launch"] = li
 
+    # Dev-profile peeks (creator-fee claims + launcher pre-launch funding) run in the background like the seller
+    # funding peeks: "never sold" alone hides a fee-harvesting launch farm, so the claims belong next to the verdict.
+    dev_futs = []
+    rem_dev = client.remaining()
+    if dev_set and (rem_dev is None or rem_dev > 5):
+        # launcher first: it is the wallet the launch-funding check needs, and only 2 wallets are peeked
+        launcher = (li.get("launcher") or "").lower()
+        ordered_devs = ([launcher] if launcher in dev_set else []) + sorted(dev_set - {launcher})
+        dev_futs = [(a, client._pool.submit(client.get, f"/addresses/{a}/internal-transactions", None, True, 4, 0))
+                    for a in ordered_devs[:2]]
+
     # Dev wallets first, so the 20-row cap can never silently exclude a developer; if it somehow does, the
     # verdict must say so instead of reading 'no selling'.
     prio = {"launcher": 0, "dev": 0, "initial_recipient": 1, "tracked": 2}
@@ -400,6 +411,41 @@ def _run(client, token, window_s, tracked, dev, top_n, from_block, t0, out):
     out["dev_sold_in_window"] = _dev_verdict(raw_rows, dev_set, dev_checked,
                                              out["coverage"]["complete"] and not dev_outflow_unresolved
                                              and not dev_swap_hint and not blind_window and identity_firm)
+
+    # --- dev profile: creator-fee claims + launcher pre-launch funding (launch-farm detection) ---
+    # Collected AFTER the sell verdict is committed: a stalled profile page can only leave these fields
+    # unknown, never delay or degrade the verdict path above.
+    if dev_futs:
+        fee_eth, fee_n, fee_srcs, fee_latest, fee_partial, fee_unknown = 0.0, 0, {}, None, False, False
+        out["launcher_funding"] = None
+        for a, fut in dev_futs:
+            try:
+                page = fut.result()
+            except Exception:  # noqa: BLE001 - explorer miss: profile stays unknown, never fabricated
+                page = None
+            fc = devprofile.fee_claims(page, a, client.chain, client.cfg)
+            if fc is None:
+                fee_unknown = True
+            else:
+                fee_eth += fc["eth"]; fee_n += fc["n"]; fee_srcs.update(fc["sources"])
+                fee_partial = fee_partial or fc["partial"]
+                if fc["latest"] and (fee_latest is None or fc["latest"] > fee_latest):
+                    fee_latest = fc["latest"]
+            if a == (li.get("launcher") or "").lower():
+                out["launcher_funding"] = devprofile.launch_funding(client, page, a, li.get("creation_block"),
+                                                                    li.get("launch_time"))
+        if fee_unknown and not fee_n:  # n, not eth: a dust claim that rounds to 0.0 is still positive evidence
+            out["dev_fee_claims"] = None  # a failed page is unknown, never "no fee extraction"
+            out["gaps"].append("dev fee-claim/pre-launch-funding check failed (explorer slow): fee extraction unknown")
+        else:
+            out["dev_fee_claims"] = {"eth": round(fee_eth, 4), "n": fee_n, "sources": fee_srcs, "latest": fee_latest,
+                                     "partial": fee_partial or fee_unknown}
+        if len(dev_set) > 2:
+            out["gaps"].append(f"{len(dev_set)} dev wallets; fee-claim/pre-launch check covers only the first 2")
+    elif dev_set:
+        out["dev_fee_claims"] = None
+        out["launcher_funding"] = None
+        out["gaps"].append("budget: dev fee-claim/pre-launch-funding check skipped")
     if tr:
         wl.data["last_block"] = max(t["block"] for t in tr)
     for s in out["top_sellers"]:
