@@ -53,8 +53,8 @@ def _enrich(cl, path):
     dev_set = {t["addr"] for t in data.get("tracked") or [] if roles(t) & {"launcher", "dev"}}
     retried, fixed = 0, 0
     for s in data.get("top_sellers") or []:
-        if s.get("eth_funders_internal") is not None:
-            continue
+        if s.get("eth_funders_internal") is not None and not s.get("eth_funding_partial"):
+            continue  # complete already; a partial (first-page-only) result is re-fetched across all pages
         retried += 1
         a = s["addr"]
         # Own-tx filter rebuilt from the SAVED tx lists: txs beyond the saved caps are not covered, so a
@@ -77,6 +77,8 @@ def _enrich(cl, path):
         for x in items:
             if ((x.get("to") or {}).get("hash") or "").lower() != a or int(x.get("value") or 0) <= 0:
                 continue
+            if x.get("error") or not x.get("success", True):
+                continue  # reverted internal call: no ETH actually moved
             if x.get("transaction_hash") in own:
                 continue
             f = x.get("from") or {}
@@ -88,6 +90,8 @@ def _enrich(cl, path):
         s["eth_funders_internal"] = funders[:6]
         if partial:
             s["eth_funding_partial"] = True
+        else:
+            s.pop("eth_funding_partial", None)  # full history read: clear a stale first-page-only marker
         if any(f["from"] in dev_set for f in funders):
             s["dev_linked"] = True
             s["eth_from_dev"] = True

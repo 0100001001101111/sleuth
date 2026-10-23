@@ -54,14 +54,15 @@ chains (explorer, RPC, timezone, known pools, launchpad events), HTTP timeouts/c
   node, so the type is inferred from the destination and flagged `inferred`. Burns executed through EIP-7702 delegated
   wallets / internal calls are found from receipt logs, not from `tx.to`.
 
-## Measured (2026-10-19, explorer degraded)
+## Measured (2026-10-22, after the triage speed pass)
 
 | Run | Latency | Requests | Notes |
 |---|---|---|---|
-| triage STOX 30 m window (103 txs) | 10.1 s | 21 | RPC stages 1.8 s; the rest is an 8 s capped explorer peek |
-| triage STOX 3 h window (3,023 txs / 6,720 transfers) | 12.7 s | 23 | RPC stages 4.4 s |
-| trace 4 batch-funded wallets | 95 s | 66 | explorer-bound (internal ETH); use `--budget 180` when Blockscout is slow |
-| burn tx check | 12 s | 4 | 8 s of it is the explorer method lookup |
+| triage GH0ST 30 m window (289 txs), cold cache | 2.8 s | 23 | one plain full-history scan replaces per-seller logs + receipts |
+| triage GH0ST 30 m window, warm cache | 2.4 s | 16 | block-timestamp + receipt cache hits |
+| triage, Blockscout wedged | ≈ +0–4 s | — | ETH-funding peeks run in background with a 4 s cap; misses surface as a gap and `sleuth enrich` backfills |
+| dev-history GH0ST (cached identity) | 0.9 s | 6 | |
+| trace 4 batch-funded wallets (2026-10-19) | 95 s | 66 | explorer-bound (internal ETH); use `--budget 180` when Blockscout is slow |
 
 ## Heuristics and known limits (read before quoting a verdict)
 

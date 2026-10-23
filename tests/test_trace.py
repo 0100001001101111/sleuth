@@ -14,7 +14,7 @@ class FakeClient:
     def head(self):
         return {"chain_id": 4663, "block": 93200000, "block_time": 1760930000, "time": 0}
 
-    def rpc(self, calls):
+    def rpc(self, calls, batch=40, soft=False, errors=None):
         out = []
         for m, p in calls:
             if m == "eth_getLogs":
