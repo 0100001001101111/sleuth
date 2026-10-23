@@ -5,10 +5,13 @@ Read-only CLI that answers four questions with transaction evidence, fast enough
 | Question | Command | Budget |
 |---|---|---|
 | Big dump — is the dev selling? | `sleuth triage TOKEN [--window 30m] [--dev A,B] [--track C]` | 20 s |
+| Has the dev EVER sold (full life, swap-confirmed)? | `sleuth dev-history TOKEN [--dev A,B]` | 70 s |
 | Are these selling wallets connected? | `sleuth trace A,B,C --token TOKEN [--dev D]` | 70 s |
 | Did the developer actually burn those tokens? | `sleuth burn TX_HASH [--token TOKEN]` / `sleuth burn TOKEN --window 24h` | — |
+| What IS this transaction? | `sleuth tx TX_HASH` (all token flows, nets, swap evidence, labels) | — |
 | Is this contract suspicious? | `sleuth contract ADDR` | — |
 | What is tracked for a token, and why? | `sleuth watch TOKEN [add ADDR ROLE "reason" --tx HASH]` | — |
+| Explorer was slow during a triage run? | `sleuth enrich data/runs/<run>_triage.json` retries the ETH-funding checks | — |
 
 `sleuth` is `bin/sleuth` (or `python3 ~/sleuth/run.py …`). Add `--json` **before** the subcommand for the full structured output.
 Every run also writes the full evidence to `data/runs/<timestamp>_<cmd>.json` and prints its path.
@@ -20,7 +23,7 @@ No wallets, no signing, no private keys. Nothing is written on chain.
 ```
 git clone https://github.com/0100001001101111/sleuth.git ~/sleuth && cd ~/sleuth
 pip install curl_cffi pytest   # curl_cffi is required: Blockscout sits behind Cloudflare TLS fingerprinting
-python3 -m pytest -q tests     # 19 regression tests, offline
+python3 -m pytest -q tests     # 35 regression tests, offline
 ```
 
 Python 3.11+. Optional `config.json` in `~/sleuth` (or `$SLEUTH_HOME`) overrides anything in `sleuth/config.py`:
@@ -51,22 +54,37 @@ chains (explorer, RPC, timezone, known pools, launchpad events), HTTP timeouts/c
   node, so the type is inferred from the destination and flagged `inferred`. Burns executed through EIP-7702 delegated
   wallets / internal calls are found from receipt logs, not from `tx.to`.
 
-## Measured (2026-10-19, explorer degraded)
+## Measured (2026-10-22, after the triage speed pass)
 
 | Run | Latency | Requests | Notes |
 |---|---|---|---|
-| triage STOX 30 m window (103 txs) | 10.1 s | 21 | RPC stages 1.8 s; the rest is an 8 s capped explorer peek |
-| triage STOX 3 h window (3,023 txs / 6,720 transfers) | 12.7 s | 23 | RPC stages 4.4 s |
-| trace 4 batch-funded wallets | 95 s | 66 | explorer-bound (internal ETH); use `--budget 180` when Blockscout is slow |
-| burn tx check | 12 s | 4 | 8 s of it is the explorer method lookup |
+| triage GH0ST 30 m window (289 txs), cold cache | 2.8 s | 23 | one plain full-history scan replaces per-seller logs + receipts |
+| triage GH0ST 30 m window, warm cache | 2.4 s | 16 | block-timestamp + receipt cache hits |
+| triage, Blockscout wedged | ≈ +0–4 s | — | ETH-funding peeks run in background with a 4 s cap; misses surface as a gap and `sleuth enrich` backfills |
+| dev-history GH0ST (cached identity) | 0.9 s | 6 | |
+| trace 4 batch-funded wallets (2026-10-19) | 95 s | 66 | explorer-bound (internal ETH); use `--budget 180` when Blockscout is slow |
 
 ## Heuristics and known limits (read before quoting a verdict)
 
-* **Pool detection**: besides configured pools and the launch market, a contract counts as a venue only if it both
-  received and sent the token (net, ≥3 txs each way) in the window. Staking, lockers, fee splitters and distributors
-  are one-directional sinks: tokens moved there are reported as "transfer to contract", never as "sold".
-  A graduated pool that only saw sells in a short window is therefore under-claimed (shows as contract transfer) —
-  add it to `known_pools` or widen `--window`. `scripts/pons_scan.py` does not auto-promote detected contracts to pools.
+* **Pool detection**: besides configured pools and the launch-event market, a contract counts as a venue if it both
+  received and sent the token (net, ≥3 txs each way) in the window, OR flows one way but independently emits a
+  known swap event (v2/v3/v4 `Swap` topic0, `swap_topics` in config) near its activity. Staking, lockers, fee
+  splitters and distributors are one-directional sinks with no swap events: tokens moved there are reported as
+  "transfer to contract", never as "sold". If the swap-evidence query fails, is sampled over an uncoverable span,
+  or a candidate falls past the per-run check cap, the contract is UNRESOLVED and any dev outflow in a tx touching
+  it degrades the dev verdict to unknown — it never silently passes as a transfer. Known accepted limit: the
+  two-way (≥3/≥3) promotion takes no swap evidence, because bonding-curve venues emit non-standard events; a busy
+  two-way staking vault could therefore be misread as a venue (deposits as "sells"). A market identified only by
+  the first-mint fallback is a CANDIDATE and must earn venue status like any other contract.
+  `scripts/pons_scan.py` does not auto-promote detected contracts to pools.
+* **Seller/buyer attribution is edge-scoped**: a wallet is a seller only if its tokens have an edge path to a
+  gaining pool inside that tx (routers collapse); an unrelated transfer bundled into the same multicall as someone
+  else's swap stays a plain transfer. Burns are attributed by direct dead edges, then via zero-netting burn
+  intermediaries, then exact-amount match; an ambiguous remainder is left unattributed rather than guessed.
+* **Launcher identity**: a launch-event launcher is proven; a first-mint-signer launcher is a candidate (may be a
+  relayer or launch service) and can support "DEV SOLD: YES" but never a firm "never sold" / "none" — those
+  degrade to unknown unless `--dev` names the wallet. `dev-history` with an unknown creation block reports
+  unknown, never NEVER.
 * **Verdicts are three-valued**: `true` = positive on-chain evidence; `false` = checked with complete evidence;
   `null` / "unknown (incomplete)" = a wallet trace failed, >200 token txs were truncated, or the explorer page was
   incomplete. "No link found" is never "independent".

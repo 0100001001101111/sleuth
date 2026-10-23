@@ -14,6 +14,13 @@ DEFAULT = {
             "tz": "America/Los_Angeles",
             # Liquidity venues whose token balance changes are swaps (auto-detection adds more per token).
             "known_pools": ["0x8366a39cc670b4001a1121b8f6a443a643e40951"],  # Uniswap-v4-style PoolManager
+            # Swap-event topic0 hashes (verified from a live GH0ST receipt, 2026-10-22): independent evidence that a
+            # contract is a trading venue / that a tx contained a swap. v2 Swap, v3 Swap, v4 PoolManager Swap.
+            "swap_topics": [
+                "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822",
+                "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
+                "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f",
+            ],
             # Launchpads: one eth_getLogs gives token, bonding-curve market and launcher wallet.
             "launchpads": [{
                 "name": "Pons V2 (PonsV2LaunchAndBuy)",

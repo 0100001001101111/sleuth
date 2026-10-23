@@ -9,7 +9,7 @@ class FakeClient:
     def __init__(self, receipt, code="0x", supply=(None, None), explorer=None):
         self.receipt, self.code, self.supply, self.explorer = receipt, code, supply, explorer
         self.errors, self.requests = [], 0
-    def rpc(self, calls):
+    def rpc(self, calls, batch=40, soft=False, errors=None):
         out = []
         for m, p in calls:
             if m == "eth_getTransactionReceipt": out.append(self.receipt)
