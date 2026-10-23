@@ -40,7 +40,8 @@ class FakeClient:
                                                   "0x" + f[2:].rjust(64, "0"), "0x" + t[2:].rjust(64, "0")], "data": hex(48_400_000 * E), "logIndex": hex(i)}
                     for i, (f, t) in enumerate(logs)]})
             elif m == "eth_getBlockByNumber":
-                out.append({"timestamp": hex(1792460000 + int(p[0], 16) - BUY_BLOCK)})  # 2026-10-20 01:33Z, after the batch
+                # "number" must echo the request or onchain._ts_fetch rejects the header (cache-poison guard)
+                out.append({"number": p[0], "timestamp": hex(1792460000 + int(p[0], 16) - BUY_BLOCK)})  # 2026-10-20 01:33Z
             elif m == "eth_getCode":
                 out.append("0x6080" if p[0] in (POOL, ROUTER, BATCH) else "0x")
             else:
@@ -149,3 +150,87 @@ def test_self_transfer_is_not_a_direct_member_connection():
     out = trace.group(SelfFunded(), SIBS[:2], TOKEN, {DEV}, pools={POOL})
     assert out["direct"] == []  # a wallet moving ETH to itself links it to nobody
     assert out["verdict"]["direct_tx_connection"] is False
+
+
+def test_zero_token_activity_raises_typo_tripwire():
+    bogus = "0x" + "9" * 40  # no logs anywhere: exactly what a mistyped address looks like
+    out = trace.group(FakeClient(), [bogus], TOKEN, {DEV}, pools={POOL})
+    assert any("verify the address" in g for g in out["gaps"]), out["gaps"]
+    assert out["verdict"]["direct_tx_connection"] is False  # the trace itself is still complete, just suspicious
+
+
+CTRL = "0xcccccccccccccccccccccccccccccccccccccccc"
+
+
+def test_unnamed_contract_funding_and_receiving_proceeds_is_bot_controller():
+    class BotFarm(FakeClient):
+        def address(self, a, **k):
+            if a.lower() == CTRL:
+                return {"hash": CTRL, "is_contract": True, "name": None, "proxy_type": None}
+            return super().address(a, **k)
+
+        def paginate(self, path, max_pages=1):
+            a = path.split("/")[2].lower()
+            if path.endswith("/internal-transactions") and a == SIBS[0]:  # hub funds the wallet pre-buy
+                return [{"transaction_hash": "0xfund", "from": {"hash": CTRL, "name": None}, "to": {"hash": a},
+                         "value": str(E // 2), "timestamp": "2026-10-20T01:02:00.000000Z", "block_number": BUY_BLOCK - 200}], True
+            if path.endswith("/transactions") and a == SIBS[0]:  # and takes the proceeds back after the sell
+                return [{"hash": "0xback", "from": {"hash": a}, "to": {"hash": CTRL}, "value": str(E),
+                         "status": "ok", "timestamp": "2026-10-20T02:00:00.000000Z"}], True
+            return super().paginate(path, max_pages)
+
+    out = trace.group(BotFarm(), SIBS[:2], TOKEN, {DEV}, pools={POOL})
+    bc = out["verdict"]["bot_controller"]
+    assert bc and bc[0]["contract"] == CTRL and bc[0]["members"] == [SIBS[0]], out["verdict"]
+    # SIBS[1] only touched the controller one way (batch funding is unrelated): not accused
+    assert all(SIBS[1] not in b["members"] for b in bc)
+
+
+def test_two_way_contract_flow_without_a_sell_is_not_a_bot_controller():
+    class NoSell(FakeClient):
+        def rpc(self, calls, batch=40, soft=False, errors=None):  # wallet never traded this token at all
+            return [[] if m == "eth_getLogs" else super(NoSell, self).rpc([(m, p)], batch, soft, errors)[0]
+                    for m, p in calls]
+
+        def address(self, a, **k):
+            if a.lower() == CTRL:
+                return {"hash": CTRL, "is_contract": True, "name": None, "proxy_type": None}
+            return super().address(a, **k)
+
+        def paginate(self, path, max_pages=1):
+            a = path.split("/")[2].lower()
+            if path.endswith("/internal-transactions") and a == SIBS[0]:  # e.g. a WETH-style unwrap in
+                return [{"transaction_hash": "0xin", "from": {"hash": CTRL, "name": None}, "to": {"hash": a},
+                         "value": str(E), "timestamp": "2026-10-20T01:02:00.000000Z", "block_number": BUY_BLOCK - 200}], True
+            if path.endswith("/transactions") and a == SIBS[0]:  # and a wrap back out
+                return [{"hash": "0xout", "from": {"hash": a}, "to": {"hash": CTRL}, "value": str(E),
+                         "status": "ok", "timestamp": "2026-10-20T02:00:00.000000Z"}], True
+            return super().paginate(path, max_pages)
+
+    out = trace.group(NoSell(), SIBS[:1], TOKEN, {DEV}, pools={POOL})
+    assert out["verdict"]["bot_controller"] == []  # no sell happened: the two-way flow accuses nobody
+
+
+def test_bot_controller_is_unknown_not_empty_when_evidence_incomplete():
+    class Truncated(FakeClient):
+        def paginate(self, path, max_pages=1):
+            items, _ = super().paginate(path, max_pages)
+            return items, False  # explorer history truncated
+    out = trace.group(Truncated(), SIBS[:2], TOKEN, {DEV}, pools={POOL})
+    assert out["verdict"]["bot_controller"] is None  # not [], which would read as a firm 'no controller'
+
+
+def test_named_service_two_way_flow_is_not_a_bot_controller():
+    class BridgedUser(FakeClient):
+        def paginate(self, path, max_pages=1):
+            a = path.split("/")[2].lower()
+            if path.endswith("/internal-transactions") and a == SIBS[0]:  # bridged in via RouteRacer (named service)
+                return [{"transaction_hash": "0xin", "from": {"hash": ROUTER, "name": "RouteRacer"}, "to": {"hash": a},
+                         "value": str(E // 2), "timestamp": "2026-10-20T01:02:00.000000Z", "block_number": BUY_BLOCK - 200}], True
+            if path.endswith("/transactions") and a == SIBS[0]:  # and bridged back out
+                return [{"hash": "0xout", "from": {"hash": a}, "to": {"hash": ROUTER}, "value": str(E),
+                         "status": "ok", "timestamp": "2026-10-20T02:00:00.000000Z"}], True
+            return super().paginate(path, max_pages)
+
+    out = trace.group(BridgedUser(), SIBS[:1], TOKEN, {DEV}, pools={POOL})
+    assert out["verdict"]["bot_controller"] == []
