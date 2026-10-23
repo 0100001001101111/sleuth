@@ -14,7 +14,7 @@ class FakeClient:
     def head(self):
         return {"chain_id": 4663, "block": 93200000, "block_time": 1760930000, "time": 0}
 
-    def rpc(self, calls):
+    def rpc(self, calls, batch=40, soft=False, errors=None):
         out = []
         for m, p in calls:
             if m == "eth_getLogs":
@@ -136,3 +136,16 @@ def test_proceeds_inside_own_swap_are_not_funding():
     for w in out["wallets"]:
         assert w["eth_funding"] == [] and len(w["eth_in_own_token_txs"]) == 1
     assert out["verdict"]["shared_funding"] is False and out["shared_funders"] == []
+
+
+def test_self_transfer_is_not_a_direct_member_connection():
+    class SelfFunded(FakeClient):
+        def paginate(self, path, max_pages=1):
+            a = path.split("/")[2].lower()
+            if path.endswith("/transactions") and a == SIBS[0]:  # wallet consolidating ETH to itself
+                return [{"hash": "0xself", "from": {"hash": a}, "to": {"hash": a}, "value": str(E),
+                         "status": "ok", "timestamp": "2026-10-19T20:00:00.000000Z"}], True
+            return super().paginate(path, max_pages)
+    out = trace.group(SelfFunded(), SIBS[:2], TOKEN, {DEV}, pools={POOL})
+    assert out["direct"] == []  # a wallet moving ETH to itself links it to nobody
+    assert out["verdict"]["direct_tx_connection"] is False

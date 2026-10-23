@@ -87,6 +87,15 @@ class Client:
         if r is not None and r <= 0:
             raise BudgetExceeded()
 
+    def _nap(self, s):
+        """Deadline-aware sleep for retry backoff: never sleeps past the budget."""
+        rem = self.remaining()
+        if rem is not None:
+            if rem <= 0:
+                raise BudgetExceeded()
+            s = min(s, rem)
+        time.sleep(s)
+
     def _count(self):
         with self._lock:
             self.requests += 1
@@ -96,22 +105,26 @@ class Client:
         self.check_budget()
         url = self.base + path
         last = None
-        for attempt in range((self.h["retries"] if retries is None else retries) + 1):
+        attempts = (self.h["retries"] if retries is None else retries) + 1
+        for attempt in range(attempts):
+            more = attempt + 1 < attempts  # back off only when another attempt will actually run
             self._count()
             try:
                 rem = self.remaining()
                 t = timeout or self.h["timeout"]
-                t = t if rem is None else min(t, max(2, rem))
+                t = t if rem is None else min(t, max(0.5, rem))
                 r = self._sess().get(url, params=params, timeout=t)
                 if r.status_code == 404 and soft:
                     return None
                 if r.status_code == 429:
                     last = ApiError("429 rate limited")
-                    time.sleep(1.5 * (attempt + 1))
+                    if more:
+                        self._nap(1.5 * (attempt + 1))
                     continue
                 if r.status_code >= 500:
                     last = ApiError(f"{r.status_code} {r.text[:80]}")
-                    time.sleep(0.5)
+                    if more:
+                        self._nap(0.5)
                     continue
                 d = r.json()
                 if not isinstance(d, (dict, list)):
@@ -120,7 +133,8 @@ class Client:
                 return d
             except (_rq.RequestsError, ValueError) as e:
                 last = ApiError(str(e)[:120])
-                time.sleep(0.3)
+                if more:
+                    self._nap(0.3)
         if soft:
             self.errors.append(f"{path}: {last}")
             return None
@@ -155,12 +169,15 @@ class Client:
         return items, False
 
     # ---------- RPC ----------
-    def rpc(self, calls, batch=40):
+    def rpc(self, calls, batch=40, soft=False, errors=None):
         """calls: [(method, params)]. Batched (<=40 per request; larger batches get 429'd), 429-aware.
-        Returns results aligned with calls (None on error, error recorded)."""
+        Returns results aligned with calls (None on error, error recorded). soft=True records nothing: only
+        for opportunistic prefetches whose every failure is retried through an error-recording path anyway.
+        errors=<list> collects into that list instead of self.errors: the caller decides whether a failure is
+        an evidence gap (e.g. transfer_logs splits and retries, so only a FINAL failure is recorded globally)."""
         out = []
         for i in range(0, len(calls), batch):
-            out.extend(self._rpc_once(calls[i:i + batch]))
+            out.extend(self._rpc_once(calls[i:i + batch], soft, errors))
         return out
 
     def _throttle(self, n):
@@ -178,44 +195,55 @@ class Client:
         if wait > 0:
             time.sleep(wait)
 
-    def _rpc_once(self, calls):
+    def _rpc_once(self, calls, soft=False, errors=None):
         self.check_budget()
+        note = errors.append if errors is not None else ((lambda m: None) if soft else self.errors.append)
         body = [{"jsonrpc": "2.0", "id": i, "method": m, "params": p} for i, (m, p) in enumerate(calls)]
-        res = None
+        res, transient = None, []  # a retried-to-success 429/timeout is not an evidence gap: record only if the call dies
         for attempt in range(4):
             self._count()
             self._throttle(len(calls))
             try:
                 rem = self.remaining()
-                t = self.h["timeout"] if rem is None else min(self.h["timeout"], max(2, rem))
+                t = self.h["timeout"] if rem is None else min(self.h["timeout"], max(0.5, rem))
                 r = self._sess().post(self.rpc_url, json=body, timeout=t)
                 if r.status_code == 429:
-                    self.errors.append("rpc: HTTP 429")
-                    time.sleep(2.0 * (attempt + 1))
+                    transient.append("rpc: HTTP 429")
+                    if attempt < 3:
+                        self._nap(2.0 * (attempt + 1))
                     continue
                 res = r.json()
             except (_rq.RequestsError, ValueError) as e:
-                self.errors.append(f"rpc: {str(e)[:100]}")
-                time.sleep(0.3)
+                transient.append(f"rpc: {str(e)[:100]}")
+                if attempt < 3:
+                    self._nap(0.3)
                 continue
             if isinstance(res, dict):
                 res = [res]
             if any("Too Many Requests" in str((x.get("error") or {}).get("message", "")) for x in res if isinstance(x, dict)):
-                self.errors.append("rpc: Too Many Requests")
-                time.sleep(2.0 * (attempt + 1))
+                res = None
+                transient.append("rpc: Too Many Requests")
+                if attempt < 3:
+                    self._nap(2.0 * (attempt + 1))
                 continue
             break
         if res is None:
+            for m in transient or ["rpc: no response"]:
+                note(m)
             return [None] * len(calls)
         if not isinstance(res, list):
-            self.errors.append(f"rpc: unexpected envelope {str(res)[:60]}")
+            note(f"rpc: unexpected envelope {str(res)[:60]}")
             return [None] * len(calls)
         by = {x.get("id"): x for x in res if isinstance(x, dict)}
         out = []
         for i, (m, _) in enumerate(calls):
-            x = by.get(i) or {}
+            x = by.get(i)
+            if x is None:  # id missing from the batch response: that sub-call silently vanished -- surface it
+                note(f"rpc {m}: no result in batch response")
+                out.append(None)
+                continue
             if "error" in x:
-                self.errors.append(f"rpc {m}: {x['error'].get('message')}"[:160])
+                note(f"rpc {m}: {x['error'].get('message')}"[:160])
             out.append(x.get("result"))
         return out
 

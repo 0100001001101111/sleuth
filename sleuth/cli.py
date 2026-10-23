@@ -1,15 +1,18 @@
 """sleuth CLI.
 
   sleuth triage TOKEN [--window 30m] [--dev ADDR,..] [--track ADDR,..] [--budget 20]
+  sleuth dev-history TOKEN [--dev ADDR,..] [--budget 70]   # has the dev EVER sold (full life)
   sleuth trace ADDR[,ADDR..] --token TOKEN [--dev ADDR,..] [--budget 70]
   sleuth burn TX_HASH [--token TOKEN]      |  sleuth burn TOKEN --window 24h
+  sleuth tx TX_HASH                        # decode one tx: all token flows + swap evidence
   sleuth contract ADDR
+  sleuth enrich RUN_JSON                   # retry failed ETH-funding checks of a saved triage run
   sleuth watch TOKEN [add ADDR ROLE "reason" [--tx HASH]]
 Every command writes full JSON evidence to ~/sleuth/data/runs/ and prints a short summary.
 """
 import argparse, json, re, sys, time
 from pathlib import Path
-from . import config as C, triage as T, trace as R, burn as B, contract as K, report
+from . import config as C, triage as T, trace as R, burn as B, contract as K, devhistory as D, txdecode as X, report
 from .client import Client, BudgetExceeded, ApiError
 from .onchain import RpcError
 from .watchlist import Watchlist
@@ -34,9 +37,72 @@ def _addrs(s):
 
 
 def _save(kind, out):
-    p = C.DATA / "runs" / f"{time.strftime('%Y%m%d-%H%M%S')}_{kind}.json"
+    # ms suffix: two runs in the same second (watch loops, scripts) must not overwrite each other
+    p = C.DATA / "runs" / f"{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}_{kind}.json"
     p.write_text(json.dumps(out, indent=1, default=str))
     return p
+
+
+def _enrich(cl, path):
+    """Reload a saved triage run and retry the sellers whose ETH-funding check failed (explorer slow)."""
+    p = Path(path)
+    data = json.loads(p.read_text())
+    if data.get("stage") != "triage":
+        raise SystemExit("enrich takes a triage run JSON (data/runs/*_triage.json)")
+    roles = lambda t: set(t.get("roles") or [t.get("role")])
+    dev_set = {t["addr"] for t in data.get("tracked") or [] if roles(t) & {"launcher", "dev"}}
+    retried, fixed = 0, 0
+    for s in data.get("top_sellers") or []:
+        if s.get("eth_funders_internal") is not None and not s.get("eth_funding_partial"):
+            continue  # complete already; a partial (first-page-only) result is re-fetched across all pages
+        retried += 1
+        a = s["addr"]
+        # Own-tx filter rebuilt from the SAVED tx lists: txs beyond the saved caps are not covered, so a
+        # proceeds-receiving tx outside them could still read as funding -- marked in gaps below.
+        own = set(s.get("acquisition_txs") or []) | set(s.get("sell_txs") or [])
+        items, params, page_failed = [], None, False
+        for _ in range(3):
+            fd = cl.get(f"/addresses/{a}/internal-transactions", params=params, soft=True)
+            if fd is None:
+                page_failed = True
+                break
+            items += fd.get("items") or []
+            params = fd.get("next_page_params")
+            if not params:
+                break
+        # a failed or leftover page means coverage is partial: found funders are still worth reporting, but an
+        # EMPTY partial result must stay None -- never fabricate "no funding" from half the pages
+        partial = page_failed or bool(params)
+        funders = []
+        for x in items:
+            if ((x.get("to") or {}).get("hash") or "").lower() != a or int(x.get("value") or 0) <= 0:
+                continue
+            if x.get("error") or not x.get("success", True):
+                continue  # reverted internal call: no ETH actually moved
+            if x.get("transaction_hash") in own:
+                continue
+            f = x.get("from") or {}
+            funders.append({"from": (f.get("hash") or "").lower(), "label": f.get("name"), "eth": round(int(x["value"]) / 1e18, 4),
+                            "ts": x.get("timestamp"), "tx": x.get("transaction_hash"), "block": x.get("block_number"),
+                            "pre_acquisition": bool(s.get("first_acquired_block") and (x.get("block_number") or 0) < s["first_acquired_block"])})
+        if partial and not funders:
+            continue  # still unknown -- leave None
+        s["eth_funders_internal"] = funders[:6]
+        if partial:
+            s["eth_funding_partial"] = True
+        else:
+            s.pop("eth_funding_partial", None)  # full history read: clear a stale first-page-only marker
+        if any(f["from"] in dev_set for f in funders):
+            s["dev_linked"] = True
+            s["eth_from_dev"] = True
+        fixed += 1
+    if fixed:
+        data.setdefault("gaps", []).append(
+            f"enriched {time.strftime('%Y-%m-%d %H:%M')}: ETH funding retried for {fixed}/{retried} seller(s); "
+            "own-tx filter rebuilt from saved tx lists (proceeds in txs beyond the saved caps could read as funding)")
+    out_p = p.with_name(p.stem + "_enriched.json")
+    out_p.write_text(json.dumps(data, indent=1, default=str))
+    return data, out_p, retried, fixed
 
 
 def main(argv=None):
@@ -49,6 +115,9 @@ def main(argv=None):
     b = sub.add_parser("trace"); b.add_argument("addrs"); b.add_argument("--token", required=True); b.add_argument("--dev"); b.add_argument("--budget", type=float)
     c = sub.add_parser("burn"); c.add_argument("target"); c.add_argument("--token"); c.add_argument("--window", default="24h")
     d = sub.add_parser("contract"); d.add_argument("addr")
+    e = sub.add_parser("dev-history"); e.add_argument("token"); e.add_argument("--dev"); e.add_argument("--budget", type=float)
+    f = sub.add_parser("tx"); f.add_argument("hash")
+    g = sub.add_parser("enrich"); g.add_argument("file")
     w = sub.add_parser("watch"); w.add_argument("token"); w.add_argument("rest", nargs="*"); w.add_argument("--tx")
     ns = ap.parse_args(argv)
     cfg = C.load()
@@ -64,6 +133,15 @@ def main(argv=None):
         return 0
 
     budget = getattr(ns, "budget", None) or cfg["budgets"].get(ns.cmd if ns.cmd in ("triage", "trace") else "trace")
+    if ns.cmd == "enrich":
+        cl = Client(cfg, ns.chain, budget_s=budget)
+        try:
+            data, out_p, retried, fixed = _enrich(cl, ns.file)
+            print(report.triage(data, cl) if "token_meta" in data else json.dumps(data, indent=1, default=str)[:2000])
+            print(f"\n[enriched {fixed}/{retried} seller(s); evidence: {out_p}]")
+            return 0
+        finally:
+            cl.close()
     cl = Client(cfg, ns.chain, budget_s=budget)
     try:
         if ns.cmd == "triage":
@@ -76,9 +154,23 @@ def main(argv=None):
             except (RpcError, ApiError) as e:
                 raise SystemExit(f"RPC failure, no result (NOT 'no activity'): {e}")
             text = report.triage(out, cl)
+        elif ns.cmd == "dev-history":
+            if not ADDR.match(ns.token):
+                raise SystemExit("token must be an address")
+            try:
+                out = D.run(cl, ns.token, _addrs(ns.dev))
+            except (RpcError, ApiError) as e:
+                raise SystemExit(f"RPC failure, no result (NOT 'no selling'): {e}")
+            text = report.dev_history(out, cl)
+        elif ns.cmd == "tx":
+            if not TXH.match(ns.hash):
+                raise SystemExit("tx must be a 0x…64-hex transaction hash")
+            out = X.decode(cl, ns.hash)
+            text = report.txdecode(out, cl)
         elif ns.cmd == "trace":
             wl = Watchlist(cl.chain_id, ns.token)
-            dev = set(_addrs(ns.dev)) | set(wl.by_role("launcher", "dev", "initial_recipient"))
+            # launcher + dev only: a creation-tx recipient can be a bundled buyer, so it is not dev evidence
+            dev = set(_addrs(ns.dev)) | set(wl.by_role("launcher", "dev"))
             lo = (wl.data.get("launch") or {}).get("creation_block")
             out = R.group(cl, _addrs(ns.addrs), ns.token, dev, wl.data.get("pools") or [], lo)
             for wlt in out["wallets"]:
@@ -98,8 +190,10 @@ def main(argv=None):
             elif ADDR.match(ns.target):
                 out = B.check_token(cl, ns.target, _window(ns.window))
                 tz = cl.chain.get("tz", "UTC")
+                dec = 10 ** out.get("decimals", 18)
+                sym = out.get("symbol") or ""
                 text = f"**{len(out['burns'])} dead-address transfers** in last {ns.window} (blocks {out['from_block']}-{out['to_block']}). totalSupply now {out['total_supply_now']}.\n" + "\n".join(
-                    f"- {b['amount']/1e18:,.0f} from {report.short(b['from'])} at {report.local(b['ts'], tz)} [tx]({cl.link('tx', b['tx'])})" for b in out["burns"][:8])
+                    f"- {b['amount']/dec:,.0f} {sym} from {report.short(b['from'])} at {report.local(b['ts'], tz)} [tx]({cl.link('tx', b['tx'])})" for b in out["burns"][:8])
             else:
                 raise SystemExit("burn target must be a tx hash or token address")
         elif ns.cmd == "contract":
