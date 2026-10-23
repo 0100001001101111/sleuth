@@ -3,7 +3,7 @@ classified with receipt-level swap evidence. Answers "has the dev EVER sold?" --
 a sell is only CONFIRMED by a swap event in its own receipt; a venue outflow without one could be an LP add, so it
 degrades the verdict to unknown instead of being counted either way."""
 import time
-from . import flows, launch, onchain
+from . import devprofile, flows, launch, onchain
 from .client import BudgetExceeded
 from .labels import DEAD
 from .watchlist import Watchlist
@@ -197,6 +197,17 @@ def _run(client, token, dev, receipts_cap, t0, out):
     complete = complete and identity_firm and window_full
     out["history_complete"] = complete
     out["dev_ever_sold"] = _verdict(out["wallets"], complete)
+    # Creator-fee claims: a dev that never sold can still be extracting ETH through a fee escrow, and a
+    # "NEVER sold" headline without that number is misleading. Reporting only, AFTER the verdict is committed:
+    # an explorer stall or budget exhaustion here must only leave fee_claims unknown, never touch the verdict.
+    for w in out["wallets"]:
+        try:
+            page = client.get(f"/addresses/{w['addr']}/internal-transactions", None, True, 6, 0)
+        except BudgetExceeded:
+            page = None
+        w["fee_claims"] = devprofile.fee_claims(page, w["addr"], client.chain, client.cfg)
+        if w["fee_claims"] is None:
+            out["gaps"].append(f"{w['addr'][:10]}: fee-claim check failed (explorer slow/budget): fee extraction unknown")
     wl.save()
     out["requests"] = client.requests
     out["errors"] = client.errors[:10]

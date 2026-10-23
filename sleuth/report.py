@@ -43,6 +43,15 @@ def triage(out, client):
         L.append("**Dev selling in window: UNKNOWN (coverage incomplete — see gaps).** " + "; ".join(
             f"{t['role']} {short(t['addr'])} holds " + (f"{t['balance_now']:,.0f} ({t['balance_pct']}%)" if t['balance_fresh'] else "?")
             for t in dev_rows[:4]))
+    fc = out.get("dev_fee_claims")
+    if fc and fc.get("n"):  # n, not eth: a dust claim must not round away into silence
+        srcs = ", ".join(fc["sources"].values()) or "fee escrow"
+        eth = fc["eth"] if fc["eth"] else "<0.0001"
+        L.append(f"- **Dev extracting via creator-fee claims: {eth} ETH** over {fc['n']} claim(s) from {srcs}; "
+                 f"latest {local(fc['latest'], tz)}" + (" (first page only)" if fc.get("partial") else ""))
+    lf = out.get("launcher_funding")
+    for s in (lf or {}).get("signals") or []:
+        L.append(f"- Launch-farm signal: {s}")
     recip_sold = [t for t in recip_rows if t["sold"]]
     if recip_sold:
         L.append("- Launch-tx recipient selling (bundled buyer possible — NOT proof of dev): " + "; ".join(
@@ -89,6 +98,10 @@ def trace(out, client):
         L.append(f"- Shared funder {short(s['funder'])} ({s['label']}) → {len(s['members'])} wallets")
     for s in v["shared_service_only"][:2]:
         L.append(f"- Shared SERVICE only ({s['label']}): {len(s['members'])} wallets. Not ownership evidence.")
+    for b in (v.get("bot_controller") or [])[:2]:
+        L.append(f"- BOT-CONTROLLER pattern: unnamed contract {short(b['contract'])} funded {len(b['members'])} "
+                 "wallet(s) pre-buy AND received ETH back after their sells — two-way flow consistent with one "
+                 "operator cycling wallets (coordination signal; not ownership proof)")
     for w in out["wallets"]:
         f = w.get("funding_before_acquisition")
         sells = [x for x in w["token_disposals"] if x["via"] == "pool (sell)"]
@@ -142,6 +155,12 @@ def dev_history(out, client):
             L.append(f"  - sell [tx]({client.link('tx', h)})")
         for h in (w.get("unconfirmed_venue_outflows") or [])[:2]:
             L.append(f"  - ambiguous venue outflow [tx]({client.link('tx', h)})")
+        fc = w.get("fee_claims")
+        if fc and fc.get("n"):
+            srcs = ", ".join(fc["sources"].values()) or "fee escrow"
+            eth = fc["eth"] if fc["eth"] else "<0.0001"
+            L.append(f"  - **creator-fee claims: {eth} ETH** over {fc['n']} claim(s) from {srcs}"
+                     + (" (first page only)" if fc.get("partial") else ""))
     L.append(f"- {out['requests']} requests, {out['latency_s']}s." + (" Gaps: " + "; ".join(out["gaps"][:4]) if out["gaps"] else ""))
     return "\n".join(L)
 

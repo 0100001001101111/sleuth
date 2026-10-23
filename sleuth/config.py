@@ -21,6 +21,9 @@ DEFAULT = {
                 "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fed8004e115fbcca67",
                 "0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f",
             ],
+            # Creator-fee escrows: internal ETH from these to a dev wallet is fee extraction, reported next to
+            # the sell verdict ("never sold" alone hides a fee-harvesting launch farm — V4M, 2026-10-22).
+            "fee_escrows": ["0xd3afeb2a57f70ef218aa82451c51b2fb0416ac9e"],  # PonsV2FeeEscrow
             # Launchpads: one eth_getLogs gives token, bonding-curve market and launcher wallet.
             "launchpads": [{
                 "name": "Pons V2 (PonsV2LaunchAndBuy)",
@@ -41,7 +44,11 @@ DEFAULT = {
     # Services: evidence of a shared funding *service*, never of a shared owner.
     "known_services": {
         "0xf70da97812cb96acdf810712aa562db8dfa3dbef": "Relay bridge solver",
+        "0xe68d0bbc023de3febda04f413db23ce9c5ea1934": "GasliteDrop batch airdrop",
+        "0xd3afeb2a57f70ef218aa82451c51b2fb0416ac9e": "PonsV2FeeEscrow (creator fee claims)",
     },
+    # Lowercased contract-name fragments that mark a creator-fee escrow on chains without a configured list.
+    "fee_claim_markers": ["feeescrow", "feecollector", "feedistributor"],
     "service_name_markers": [
         "router", "pool", "depository", "hook", "factory", "locker", "settler",
         "burner", "batchtransfer", "escrow", "executor", "launch", "proxy",
