@@ -198,15 +198,17 @@ def group(client, addrs, token, dev_set, pools=(), lo_block=None):
 
     direct = []
     for t in traces:
+        # a wallet moving ETH/tokens to ITSELF is not a member-to-member connection: self rows here made
+        # "direct tx link: YES" fire on nothing but self-transfers
         for e in t["eth_funding"]:
-            if e["from"] in members:
+            if e["from"] in members and e["from"] != t["addr"]:
                 direct.append({"from": e["from"], "to": t["addr"], "eth": e["eth"], "tx": e["tx"]})
         for b in t["batch_siblings"]:
-            if b["sender"] in members:
+            if b["sender"] in members and b["sender"] != t["addr"]:
                 direct.append({"from": b["sender"], "to": t["addr"], "eth": b["my_eth"], "tx": b["tx"], "via": b["contract"]})
         for x in t["token_acquisitions"]:
             for f in (x.get("from_all") or ([x["from"]] if x.get("from") else [])):
-                if f in members:
+                if f in members and f != t["addr"]:
                     direct.append({"from": f, "to": t["addr"], "token_amount": x["amount"], "tx": x["tx"]})
 
     coord, seen_batches = [], set()
