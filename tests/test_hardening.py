@@ -65,7 +65,7 @@ class FakeMintClient:
                                 "topics": [TRANSFER, onchain.pad(ZERO), onchain.pad(to)], "data": hex(1000 * E)}
         self.logs = [mint(MARKET, 0), mint(SIBS[0], 1)]
 
-    def rpc(self, calls):
+    def rpc(self, calls, batch=40, soft=False, errors=None):
         res = []
         for method, params in calls:
             if method == "eth_getLogs":
@@ -99,13 +99,14 @@ class FakeCapClient:
         self.calls = []
         self.mode = mode  # "silent" = full list at cap; "error" = None + cap error text
 
-    def rpc(self, calls):
+    def rpc(self, calls, batch=40, soft=False, errors=None):
+        sink = errors if errors is not None else self.errors
         ((method, (q,)),) = calls
         start, end = int(q["fromBlock"], 16), int(q["toBlock"], 16)
         self.calls.append((start, end))
         if end - start > 50:  # "too many logs" for a wide span
             if self.mode == "error":
-                self.errors.append("rpc eth_getLogs: query returned more than 10000 results")
+                sink.append("rpc eth_getLogs: query returned more than 10000 results")
                 return [None]
             return [[{}] * LOG_CAP]  # silent truncation: a full page with no error
         lg = {"transactionHash": f"0x{start:x}", "blockNumber": hex(start), "logIndex": "0x0",
@@ -125,6 +126,91 @@ def test_transfer_logs_splits_on_cap_error():
     cl = FakeCapClient("error")
     logs = onchain.transfer_logs(cl, TOKEN, 0, 100)
     assert len(cl.calls) > 1 and len(logs) >= 2
+    assert cl.errors == []  # the oversized query was fully recovered by splitting: no phantom coverage gap
+
+
+# --- transfer_logs_batch: aligned results, None on any miss, and never a recorded error (callers fall back) ---
+
+class FakeBatchClient:
+    chain_id = "4663"
+    cache = None
+
+    def __init__(self):
+        self.errors = []
+
+    def rpc(self, calls, batch=40, soft=False, errors=None):
+        res = []
+        for method, params in calls:
+            if method != "eth_getLogs":
+                res.append("0x1237")  # the oversize placeholder sub-call
+                continue
+            lo = int(params[0]["fromBlock"], 16)
+            if lo == 666:
+                res.append(None)  # failed query
+            elif lo == 777:
+                res.append([{}] * LOG_CAP)  # full page: possibly silently truncated
+            else:
+                res.append([{"transactionHash": "0xa", "blockNumber": params[0]["fromBlock"], "logIndex": "0x0",
+                             "topics": [TRANSFER, onchain.pad(DEV), onchain.pad(SIBS[0])], "data": hex(E)}])
+        return res
+
+
+def test_transfer_logs_batch_aligns_and_returns_none_for_every_miss():
+    cl = FakeBatchClient()
+    res = onchain.transfer_logs_batch(cl, TOKEN, [
+        (0, 20_000_000, None, None),  # over MAX_RANGE: skipped, placeholder keeps alignment
+        (666, 1000, None, DEV),       # RPC failure
+        (777, 1000, DEV, None),       # page at the log cap
+        (5, 1000, None, None),        # good
+    ])
+    assert res[:3] == [None, None, None]  # every miss is a None the caller must re-fetch authoritatively
+    assert [x["from"] for x in res[3]] == [DEV]
+    assert cl.errors == []  # soft: a batch miss is never an evidence gap of its own
+
+
+# --- block-timestamp cache: exact values only, height verified, misses never cached ---
+
+class DictCache:
+    def __init__(self):
+        self.d = {}
+
+    def get(self, k):
+        return self.d.get(k), k in self.d
+
+    def put(self, k, v, chain_id, block):
+        self.d[k] = v
+
+
+class FakeTsClient:
+    chain_id = "4663"
+
+    def __init__(self):
+        self.errors = []
+        self.cache = DictCache()
+        self.calls = 0
+
+    def rpc(self, calls, batch=40, soft=False, errors=None):
+        out = []
+        for _m, (b, _full) in calls:
+            self.calls += 1
+            n = int(b, 16)
+            if n == 13:
+                out.append({"number": hex(99), "timestamp": hex(1)})  # provider echoes the WRONG height
+            elif n == 14:
+                out.append(None)  # failed sub-call
+            else:
+                out.append({"number": b, "timestamp": hex(1000 + n)})
+        return out
+
+
+def test_block_timestamp_cache_verifies_height_and_never_caches_a_miss():
+    cl = FakeTsClient()
+    ts = onchain._ts_fetch(cl, [7, 13, 14])
+    assert ts[7] == 1007
+    assert ts[13] is None and ts[14] is None  # mismatched height / failure yield None, never a wrong timestamp
+    assert cl.calls == 3
+    ts2 = onchain._ts_fetch(cl, [7, 13])
+    assert ts2[7] == 1007 and cl.calls == 4  # 7 came from cache; the unverifiable 13 was re-fetched, not cached
 
 
 # --- swap_evidence: an RPC failure must land the venue in `unresolved`, never in silent 'no evidence' ---
@@ -134,7 +220,7 @@ class FakeSwapClient:
         self.answers = answers  # addr -> list (logs) | None (RPC failure)
         self.errors = []
 
-    def rpc(self, calls):
+    def rpc(self, calls, batch=40, soft=False, errors=None):
         return [self.answers.get(q["address"]) for _, (q,) in calls]
 
 
@@ -155,7 +241,7 @@ def test_swap_evidence_chunks_wide_spans_and_never_clears_a_sampled_span():
     class Recorder(FakeSwapClient):
         calls = ()
 
-        def rpc(self, calls):
+        def rpc(self, calls, batch=40, soft=False, errors=None):
             self.calls = list(self.calls) + [(int(q["fromBlock"], 16), int(q["toBlock"], 16)) for _, (q,) in calls]
             return [[] for _ in calls]
     cl = Recorder({})

@@ -9,13 +9,32 @@ from .watchlist import Watchlist
 
 
 def launch_info(client, token):
-    """Who launched the token and who received tokens in the creation tx. Explorer-only, cached (durable)."""
+    """Who launched the token and who received tokens in the creation tx. One explorer page for the creation-tx
+    hash (durable, cached); the tx itself is hydrated from RPC (the explorer /transactions page costs 2-10s when
+    Blockscout is degraded and the receipt carries the same token transfers). Explorer tx page stays as fallback."""
     meta = client.address(token)
     ctx = meta.get("creation_transaction_hash")
     info = {"creator": meta.get("creator_address_hash"), "creation_tx": ctx, "launcher": None, "initial_recipients": [],
             "creation_block": None, "launch_time": None}
     if not ctx:
         return info
+    (raw,) = client.rpc([("eth_getTransactionByHash", [ctx])], soft=True)
+    if isinstance(raw, dict) and raw.get("from"):
+        n_err = len(client.errors)
+        recs = onchain.tx_records(client, [ctx], token)
+        # An empty record set is only trustworthy when the receipt fetch did not error: a transient receipt
+        # failure here would otherwise be PERSISTED (watchlist caches launch info) as a complete, empty
+        # recipient set. On failure, fall through to the explorer tx page instead.
+        if recs or len(client.errors) == n_err:
+            info["launcher"] = raw["from"].lower()
+            blk = int(raw["blockNumber"], 16) if raw.get("blockNumber") else None
+            info["creation_block"] = blk
+            info["launch_time"] = onchain.block_time(client, blk) if blk is not None else None
+            kinds = onchain.codes(client, sorted({r["to"] for r in recs if r["to"]}))
+            # only a KNOWN wallet counts: 'unknown' (failed getCode) must not become launch-recipient evidence
+            info["initial_recipients"] = [{"addr": r["to"], "amount": r["value"]} for r in recs
+                                          if r["to"] and kinds.get(r["to"]) in ("eoa", "eoa7702")]
+            return info
     tx = client.tx(ctx)
     if not tx:
         return info
@@ -138,7 +157,9 @@ def _run(client, token, window_s, tracked, dev, top_n, from_block, t0, out):
     wl.data["pools"] = sorted(pools)
     tr = flows.trades(records, pools, DEAD)
     agg = flows.aggregate(tr)
-    times, approx = onchain.block_times(client, [t["block"] for t in tr] + [from_block])
+    # Only burns and the window start ever emit a timestamp, so only those blocks are resolved (a trade's ts
+    # stays None). Usually <=40 blocks -> exact per-block lookups from cache/RPC instead of interpolation.
+    times, approx = onchain.block_times(client, [t["block"] for t in tr if t["kind"] == "burn"] + [from_block])
     for t in tr:
         t["ts"] = times.get(t["block"])
     pct = (lambda v: round(100 * v / supply, 3)) if supply else (lambda v: None)
@@ -162,6 +183,15 @@ def _run(client, token, window_s, tracked, dev, top_n, from_block, t0, out):
     out["burns"] = [{"addr": t["addr"], "amount": fmt(t["amount"]), "tx": t["tx"], "ts": t["ts"], "block": t["block"]}
                     for t in tr if t["kind"] == "burn"][:10]
     out["timing"]["flows_s"] = round(time.monotonic() - t0, 2)
+
+    # ETH-funding explorer peeks start NOW, in the background: the explorer regularly eats its whole timeout and
+    # returns nothing, so overlapping it with the RPC stages below makes a wedged Blockscout cost ~0 extra wall time.
+    # 4s cap, no retries: `sleuth enrich` backfills misses afterwards.
+    rem = client.remaining()
+    fund_futs = []
+    if rem is None or rem > 5:
+        fund_futs = [client._pool.submit(client.get, f"/addresses/{s['addr']}/internal-transactions", None, True, 4, 0)
+                     for s in out["top_sellers"]]
 
     # --- launcher / dev wallets ---
     li = (wl.data.get("launch") or {"launcher": None, "initial_recipients": []}) if not launch_fut else None
@@ -215,13 +245,35 @@ def _run(client, token, window_s, tracked, dev, top_n, from_block, t0, out):
     src_addrs = set()
     own_txs = {s["addr"]: {t["tx"] for t in tr if t["addr"] == s["addr"]} for s in out["top_sellers"]}  # every window trade
     acq_partial_gap = False
-    for s in out["top_sellers"]:
+    # Fast path: ONE plain scan of the token's pre-window history, merged with the window records, is the complete
+    # transfer history -- every seller's inbound/outbound logs and the acquisition-tx edges fall out of it with no
+    # further RPC (replaces up to 2 getLogs + 25 receipts per seller). Only used when the scan comes back whole
+    # (not capped, not failed); otherwise the per-seller filtered queries below produce identical evidence, slower.
+    hist = records if lo >= from_block else None
+    pre = None
+    if out["top_sellers"] and hist is None:
+        (h0,) = onchain.transfer_logs_batch(client, token, [(lo, from_block - 1, None, None)])
+        if h0 is not None:
+            hist = h0 + records
+        else:
+            pre = onchain.transfer_logs_batch(client, token,
+                                              [q for s in out["top_sellers"]
+                                               for q in ((lo, head["block"], None, s["addr"]), (lo, head["block"], s["addr"], None))])
+    for i, s in enumerate(out["top_sellers"]):
         a = s["addr"]
         try:
-            ins = onchain.transfer_logs(client, token, lo, head["block"], to=a)
-            outs_s = onchain.transfer_logs(client, token, lo, head["block"], frm=a)
+            if hist is not None:
+                ins = [x for x in hist if x["to"] == a]
+                outs_s = [x for x in hist if x["from"] == a]
+            else:
+                ins = pre[2 * i] if pre and pre[2 * i] is not None else onchain.transfer_logs(client, token, lo, head["block"], to=a)
+                outs_s = pre[2 * i + 1] if pre and pre[2 * i + 1] is not None else onchain.transfer_logs(client, token, lo, head["block"], frm=a)
             uniq = list(dict.fromkeys(x["tx"] for x in reversed(ins)))
-            recs = onchain.tx_records(client, uniq[:25], token)
+            if hist is not None:
+                want = set(uniq)  # complete history in hand: classify EVERY inbound tx, the 25-receipt cap is moot
+                recs = [x for x in hist if x["tx"] in want]
+            else:
+                recs = onchain.tx_records(client, uniq[:25], token)
         except BudgetExceeded:
             out["gaps"].append("budget hit before seller acquisition check")
             break
@@ -230,7 +282,7 @@ def _run(client, token, window_s, tracked, dev, top_n, from_block, t0, out):
             continue
         # full inbound AND outbound history: old sale proceeds must not read as 'funding' later
         own_txs[a] |= {x["tx"] for x in ins} | {x["tx"] for x in outs_s}
-        s["acquisition_partial"] = len(uniq) > 25
+        s["acquisition_partial"] = hist is None and len(uniq) > 25
         if s["acquisition_partial"] and not acq_partial_gap:
             out["gaps"].append("acquisition check partial for some sellers (only the 25 most recent inbound txs classified)")
             acq_partial_gap = True
@@ -260,34 +312,48 @@ def _run(client, token, window_s, tracked, dev, top_n, from_block, t0, out):
         s["acquired_from_kinds"] = {k: src_kinds.get(k) for k in s.get("acquired_from", {}) if k.startswith("0x")}
     out["timing"]["acq_s"] = round(time.monotonic() - t0, 2)
 
-    # --- ETH funders of top sellers: explorer internal txs, best effort, hard-capped so triage stays fast ---
-    rem = client.remaining()
-    cap = 8 if rem is None else min(8, rem - 1)
-    if cap >= 3:
-        tops = [s["addr"] for s in out["top_sellers"]]
-        fund = client.many([f"/addresses/{a}/internal-transactions" for a in tops], timeout=cap, retries=0)
+    # --- ETH funders of top sellers: collect the background explorer fetches started after the flows stage ---
+    if fund_futs:
+        fund = []
+        for f in fund_futs:
+            try:
+                fund.append(f.result())
+            except Exception:  # noqa: BLE001 - budget/transport errors: funding stays unknown, never fabricated
+                fund.append(None)
+        fund_partial = False
         for s, fd in zip(out["top_sellers"], fund):
             if fd is None:
                 s["eth_funders_internal"] = None
                 continue
+            paged = bool(fd.get("next_page_params"))  # triage reads one page; older funding may exist beyond it
             own = own_txs.get(s["addr"], set())
             funders = []
             for x in (fd.get("items") or []):
                 if ((x.get("to") or {}).get("hash") or "").lower() != s["addr"] or int(x.get("value") or 0) <= 0:
                     continue
+                if x.get("error") or not x.get("success", True):
+                    continue  # reverted internal call: no ETH actually moved, never funding or dev-link evidence
                 if x.get("transaction_hash") in own:
                     continue  # ETH received inside the wallet's own swap = sale proceeds / refund, not funding
                 f = x.get("from") or {}
                 funders.append({"from": (f.get("hash") or "").lower(), "label": f.get("name"), "eth": round(int(x["value"]) / 1e18, 4),
                                 "ts": x.get("timestamp"), "tx": x.get("transaction_hash"), "block": x.get("block_number"),
                                 "pre_acquisition": bool(s.get("first_acquired_block") and (x.get("block_number") or 0) < s["first_acquired_block"])})
+            if paged and not funders:
+                s["eth_funders_internal"] = None  # a truncated history with nothing found is unknown, not "no funding"
+                continue
             s["eth_funders_internal"] = funders[:6]
+            if paged:
+                s["eth_funding_partial"] = True
+                fund_partial = True
             if any(f["from"] in dev_set for f in funders):
                 s["dev_linked"] = True
                 s["eth_from_dev"] = True
-        if any(f is None for f in fund):
-            out["gaps"].append("explorer slow: ETH funding of some top sellers not checked (run `trace`)")
-    else:
+        if any(s.get("eth_funders_internal") is None for s in out["top_sellers"]):
+            out["gaps"].append("explorer slow: ETH funding of some top sellers not checked (run `enrich` or `trace`)")
+        if fund_partial:
+            out["gaps"].append("ETH funding history truncated for some top sellers (first explorer page only; run `enrich`)")
+    elif out["top_sellers"]:
         out["gaps"].append("budget: ETH funding of top sellers not checked (run `trace`)")
 
     if any(e.startswith("rpc") for e in client.errors):
