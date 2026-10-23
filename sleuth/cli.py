@@ -36,6 +36,25 @@ def _addrs(s):
     return out
 
 
+def _typo_check(addrs, known):
+    """Warn when a traced address is NOT in the watchlist but matches a watchlist entry on the first 4 and last
+    4 hex digits — exactly the shape a short display shows (0x2a71…82ec), so exactly what an address wrongly
+    reconstructed from one matches. A typo'd address traces clean, so the question must be asked loudly
+    (V4M, 2026-10-22). Chance match for an unrelated pair is 16^-8: warnings stay rare."""
+    warns = []
+    kl = {k.lower() for k in known}
+    for a in addrs:
+        al = a.lower()
+        if al in kl:
+            continue
+        for k in kl:
+            if k[2:6] == al[2:6] and k[-4:] == al[-4:]:
+                warns.append(f"ADDRESS TYPO? {a} is not in the watchlist but matches watchlist entry {k} on its "
+                             "first 4 and last 4 hex digits — reconstructed from a short display? Verify before "
+                             "trusting a clean trace")
+    return warns
+
+
 def _save(kind, out):
     # ms suffix: two runs in the same second (watch loops, scripts) must not overwrite each other
     p = C.DATA / "runs" / f"{time.strftime('%Y%m%d-%H%M%S')}-{int(time.time() * 1000) % 1000:03d}_{kind}.json"
@@ -172,7 +191,11 @@ def main(argv=None):
             # launcher + dev only: a creation-tx recipient can be a bundled buyer, so it is not dev evidence
             dev = set(_addrs(ns.dev)) | set(wl.by_role("launcher", "dev"))
             lo = (wl.data.get("launch") or {}).get("creation_block")
-            out = R.group(cl, _addrs(ns.addrs), ns.token, dev, wl.data.get("pools") or [], lo)
+            addrs = _addrs(ns.addrs)
+            warns = _typo_check(addrs, wl.data["addresses"].keys())
+            out = R.group(cl, addrs, ns.token, dev, wl.data.get("pools") or [], lo)
+            if warns:
+                out["gaps"] = warns + (out.get("gaps") or [])
             for wlt in out["wallets"]:
                 if wlt["batch_siblings"] or any(x["via"] == "pool (sell)" for x in wlt["token_disposals"]):
                     wl.add(wlt["addr"], "traced", f"{wlt['label']}; traced {time.strftime('%Y-%m-%d')}",
