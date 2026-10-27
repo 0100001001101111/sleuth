@@ -4,3 +4,4 @@ __pycache__/
 tests/_home/
 .pytest_cache/
 config.json
+.venv/

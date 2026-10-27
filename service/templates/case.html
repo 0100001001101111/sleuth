@@ -1,0 +1,43 @@
+{% extends "base.html" %}{% block title %}Case {{ case['id'][:8] }} · Sleuth{% endblock %}{% block body %}
+{% macro vword(w) %}<span class="v {{ 'YES' if w=='YES' else ('no' if w=='no' else 'unk') }}">{{ w }}</span>{% endmacro %}
+<h1>{{ 'Rug screen' if case['kind']=='rug' else 'Wallet drain screen (beta)' }} <span class="mut">· case {{ case['id'][:8] }}</span></h1>
+<p class="m">{{ 'token' if case['kind']=='rug' else 'wallet' }} {{ case['subject'] }} · chain {{ case['chain_id'] }} · opened {{ case['created_at']|local }} · product {{ case['product'] }}</p>
+<div class="box">This page is private: anyone with the full link can read it. Save the link; it is not recoverable. Nothing here is an accusation. Ownership of any address is unknown unless stated.</div>
+
+<h2>Runs</h2>
+{% for r, res in runs %}<div class="card"><strong>{{ r['kind'] }}</strong> · {{ r['state'] }} · attempts {{ r['attempts'] }} · started {{ r['started_at']|local }} · finished {{ r['finished_at']|local }}
+{% if r['state'] in ('queued','leased') %}<p class="warn">Working… refresh this page in ~20 seconds.{% if r['requires_entitlement'] %} (starts after payment settles){% endif %}</p>{% endif %}
+{% if res and 'complete' in res %}<p class="mut">checked through block {{ res.get('checked_through') or 'unknown' }} · {{ 'complete' if res.get('complete') else 'INCOMPLETE' }}</p>{% endif %}
+{% if res and res.get('gaps') %}<details><summary>{{ res['gaps']|length }} gap(s)</summary><ul>{% for g in res['gaps'] %}<li class="m">{{ g }}</li>{% endfor %}</ul></details>{% endif %}
+{% if res and res.get('error') %}<p class="bad">{{ res['error'] }}</p>{% endif %}
+{% if res and res.get('triage') %}{% set t = res['triage'] %}<p>{{ t.get('summary','') }}</p>
+{% if t.get('launch') %}<p class="m">launcher {{ t['launch'].get('launcher') or 'unknown' }} · launchpad {{ t['launch'].get('launchpad') or '?' }} · creation block {{ t['launch'].get('creation_block') or '?' }}</p>{% endif %}
+{% if t.get('tracked') %}<table><tr><th>address</th><th>roles</th><th>sold</th><th>bought</th><th>balance now</th></tr>{% for w in t['tracked'] %}<tr><td class="m">{{ w['addr'] }}</td><td>{{ w['roles']|join(', ') }}</td><td>{{ w['sold'] }}</td><td>{{ w['bought'] }}</td><td>{{ w['balance_now'] if w['balance_fresh'] else 'unknown' }}</td></tr>{% endfor %}</table>{% endif %}{% endif %}
+{% if res and res.get('launch_calldata') and res['launch_calldata'].get('decoded') %}{% set d = res['launch_calldata']['decoded'] %}<p>Launch call decoded: {{ d['name'] }} ({{ d['symbol'] }}) · creator tax {{ d['creator_tax_bps'] }} bps · fee recipient <span class="m">{{ d['creator_fee_recipient'] }}</span> · snipe-tax exemptions: {{ d['snipe_tax_exemptions']|length }}</p>
+{% if d['snipe_tax_exemptions'] %}<details><summary>exempt addresses</summary><ul>{% for a in d['snipe_tax_exemptions'] %}<li class="m">{{ a }}</li>{% endfor %}</ul></details>{% endif %}{% endif %}
+{% if res and res.get('coordinated_launch') %}{% set c = res['coordinated_launch'] %}<p>Early-buy concentration test (first {{ c.get('thresholds',{}).get('blocks','?') }} blocks): {{ 'YES, over threshold' if c.get('verdict') else ('no' if c.get('verdict') is sameas false else 'unknown (incomplete)') }} · early buyers {{ c.get('early_buyers','?') }}, early share {{ '%.1f'|format(100*(c.get('early_share') or 0)) }}%, exempt buyers {{ c.get('exempt_buyers','?') }} · <span class="mut">{{ c.get('reason','') }}</span></p>{% endif %}
+{% if res and res.get('events') is defined and case['kind']=='drain' %}<p>{{ res['events']|length }} event(s) in window{% if res.get('delegation') %} · EIP-7702 delegation now: {{ 'YES' if res['delegation'].get('delegated') else ('no' if res['delegation'].get('delegated') is sameas false else 'unknown') }}{% if res['delegation'].get('delegate_target') %} → <span class="m">{{ res['delegation']['delegate_target'] }}</span> (observation only; the target is a contract, not a person){% endif %}{% endif %}</p>
+{% if res['events'] %}<table><tr><th>block</th><th>event</th><th>asset</th><th>counterparty</th><th>tx</th></tr>{% for e in res['events'][:100] %}<tr><td>{{ e.get('block') }}</td><td>{{ e.get('event') }}</td><td class="m">{{ e.get('token') or e.get('address') }}</td><td class="m">{{ e.get('to') or e.get('spender') or e.get('operator') or '' }}</td><td class="m">{{ e.get('tx') }}</td></tr>{% endfor %}</table>{% endif %}{% endif %}
+{% if res and res.get('dev_history') %}<p>Developer history: {{ res['dev_history'].get('summary','') }}</p>{% endif %}
+{% if res %}<details><summary>raw result (JSON)</summary><pre>{{ res|tojson(indent=1) }}</pre></details>{% endif %}
+</div>{% else %}<p class="mut">No runs yet.</p>{% endfor %}
+
+<h2>Findings</h2>
+{% if assertions %}<table><tr><th>question</th><th>about</th><th>verdict</th><th>basis</th></tr>{% for a in assertions %}<tr><td>{{ a['predicate'] }}{% if a['object'] %} <span class="mut">({{ a['object'] }})</span>{% endif %}</td><td class="m">{{ a['subject']|short }}</td><td>{{ vword(a['verdict']) }}</td><td class="mut">{{ a['reason'] }} <span class="m">{{ a['rule_version'] }}</span></td></tr>{% endfor %}</table>
+{% else %}<p class="mut">Findings appear when the run finishes.</p>{% endif %}
+
+{% if case['kind']=='rug' %}<h2>Founding case</h2>
+{% if entitled %}<p class="ok">Entitled. Deep pass queued/complete above; monitoring below.</p>
+{% elif payments %}{% set p = payments[0] %}<div class="card"><p>Order {{ p['state'] }}: send exactly <strong>{{ p['amount'] }} {{ p['asset'] }}</strong> on <strong>{{ p['network'] }}</strong> to</p><p class="m">{{ p['pay_to'] }}</p><p class="mut">From any wallet you like (not the affected one). Settlement is confirmed by the operator against the Base explorer; this page updates when it settles. Reference: {{ p['id'][:8] }}.</p></div>
+{% elif checkout_enabled %}<div class="card"><p>$29 in USDC on Base: deep deterministic pass (dev history across prior launches, wallet trace for shared funding and coordinated trading), evidence package, 30 days of finalized-block monitoring. No human investigator, no support, no report filing, no recovery. <a href="/methodology">Methodology</a>.</p>
+<form method="post" action="/c/{{ case['id'] }}/checkout"><input type="hidden" name="k" value="{{ k }}"><button type="submit">Create order</button></form></div>
+{% else %}<p class="mut">Checkout is not enabled on this instance.</p>{% endif %}{% endif %}
+
+{% if subs %}<h2>Monitoring</h2><table><tr><th>state</th><th>until</th><th>evidence cursor (finalized)</th><th>provisional cursor</th><th>last success</th><th>last error</th></tr>{% for s in subs %}<tr><td>{{ s['state'] }}</td><td>{{ s['ends_at']|local }}</td><td class="m">{{ s['finalized_cursor'] }} {{ (s['finalized_hash'] or '')[:12] }}</td><td class="m">{{ s['provisional_cursor'] }} {{ (s['provisional_hash'] or '')[:12] }}</td><td>{{ s['last_success_at']|local }}</td><td class="warn">{{ s['last_error'] or '' }}</td></tr>{% endfor %}</table>
+<p class="mut">Alerts are written for finalized blocks only. "degraded" means the provider failed repeatedly and cursors are behind; the stated cursor is the truth, not "now".</p>{% endif %}
+
+{% if evidence %}<h2>Monitored evidence</h2><table><tr><th>block</th><th>finality</th><th>key</th><th>observed</th></tr>{% for e in evidence %}<tr><td>{{ e['block'] }}</td><td>{{ e['finality'] }}</td><td class="m">{{ e['key'] }}</td><td>{{ e['observed_at']|local }}</td></tr>{% endfor %}</table>{% endif %}
+
+<h2>Export</h2><p><a class="btn" href="/c/{{ case['id'] }}/export.json?k={{ k }}">Evidence package (JSON)</a> <a class="btn" href="/c/{{ case['id'] }}/export.html?k={{ k }}">Printable (HTML)</a></p>
+<p class="mut">The JSON manifest hash is recomputable: canonical JSON with the hash field blank.</p>
+{% endblock %}

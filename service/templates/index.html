@@ -1,0 +1,12 @@
+{% extends "base.html" %}{% block title %}Sleuth · incident screening for Robinhood Chain{% endblock %}{% block body %}
+<h1>Was it a rug? Was my wallet drained?</h1>
+<p>Free, read-only screening of a token launch or a wallet on Robinhood Chain (chain id {{ chain_id }}). You get on-chain facts and three-valued answers (<span class="v YES">YES</span> <span class="v no">no</span> <span class="v unk">unknown (incomplete)</span>), with what was checked and through which block. Nothing is hidden behind a paywall.</p>
+<div class="grid">
+<div class="card"><h3>I was rugged</h3><p>Paste the token address. We identify the launch, decode the launchpad call (including snipe-tax exemption lists), check the first blocks for coordinated buying, and measure whether tracked wallets sold in the last 30 minutes.</p><a class="btn" href="/screen">Run a rug screen</a></div>
+<div class="card"><h3>My wallet was drained <span class="mut">(beta)</span></h3><p>Paste your wallet address and when it happened. We list every token and NFT transfer out, every approval you granted, and whether the account currently delegates to a contract (EIP-7702). We never need your keys.</p><a class="btn" href="/drain">Run a drain screen</a></div>
+</div>
+<h2>Founding case · $29 in USDC</h2>
+<p>If the free screen leaves open questions, a founding case adds a deeper deterministic pass (the developer's history across prior launches, wallet-to-wallet tracing for shared funding and coordinated trading), a private case workspace, a reproducible evidence package (JSON with a verifiable hash, plus HTML), and 30 days of continuous monitoring of the tracked addresses with alerts on finalized blocks.</p>
+<div class="box"><strong>What it is not.</strong> No human investigator, no support desk, no report filing on your behalf, no recovery. Accusations and any external report need human review and your written authorization, and are outside this product today. Read the <a href="/methodology">methodology</a> before paying.</div>
+{% if x402_enabled %}<p class="mut">Agents: <span class="m">POST /v1/screen/token</span> is x402-gated (exact scheme, USDC on Base).</p>{% endif %}
+{% endblock %}
