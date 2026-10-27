@@ -1,13 +1,19 @@
 {% extends "base.html" %}{% block title %}{{ 'Rug screen' if kind=='rug' else 'Wallet drain screen (beta)' }} · Sleuth{% endblock %}{% block body %}
-<h1>{{ 'Rug screen' if kind=='rug' else 'Wallet drain screen' }}{% if kind=='drain' %} <span class="mut">beta</span>{% endif %}</h1>
-{% if error %}<div class="box bad">{{ error }}</div>{% endif %}
-{% if kind=='drain' %}<div class="box">Beta: this screen reads events only. It can show transfers out, approvals and delegation; it cannot tell you <em>why</em> they happened, whether your key was compromised, or whether an approval was the cause. Those stay "unknown". It will never report a wallet as clean.</div>{% endif %}
+<div class="eyebrow">Free screen</div>
+<h1>{{ 'Rug screen' if kind=='rug' else 'Wallet drain screen' }}{% if kind=='drain' %} <span class="tag warn">beta</span>{% endif %}</h1>
+<p class="lead">{{ 'Launch facts, early-buy concentration and recent selling for one token.' if kind=='rug' else 'Transfers out, approvals and current delegation for one wallet, from events only.' }}</p>
+{% if error %}<div class="note bad">{{ error }}</div>{% endif %}
+{% if kind=='drain' %}<div class="note">This screen reads events only. It can show transfers out, approvals and delegation; it cannot tell you <em>why</em> they happened, whether your key was compromised, or whether an approval was the cause. Those stay "unknown". It will never report a wallet as clean.</div>{% endif %}
+<div class="grid two" style="align-items:start">
 <form method="post" action="/screen" class="card"><input type="hidden" name="kind" value="{{ kind }}">
-<label>{{ 'Token contract address' if kind=='rug' else 'Your wallet address' }}</label><input name="subject" class="m" required pattern="0x[0-9a-fA-F]{40}" placeholder="0x…">
-{% if kind=='drain' %}<label>When did it happen? <span class="mut">(unix seconds, optional; we scan 1 h before to 24 h after)</span></label><input name="incident_ts" inputmode="numeric" placeholder="e.g. 1761480000">
-<label>Approximate loss <span class="mut">(optional, free text)</span></label><input name="claimed_loss" maxlength="100">{% endif %}
-<label>Email <span class="mut">(optional; used only for your private link and monitoring alerts)</span></label><input name="email" type="email">
-<p class="mut">We will never ask for a seed phrase, private key, wallet connection, or a transaction from your wallet. Anyone who does is not us.</p>
-<button type="submit">Run free screen</button></form>
-<p class="mut">Takes about 20 seconds of chain reads. Your results page link is private; save it.</p>
+<label style="margin-top:0">{{ 'Token contract address' if kind=='rug' else 'Your wallet address' }}</label><input name="subject" class="m" required pattern="0x[0-9a-fA-F]{40}" placeholder="0x…" autocomplete="off" spellcheck="false">
+{% if kind=='drain' %}<label>When did it happen? <span class="hint">unix seconds, optional · we scan 1 h before to 24 h after</span></label><input name="incident_ts" inputmode="numeric" placeholder="e.g. 1761480000">
+<label>Approximate loss <span class="hint">optional, free text</span></label><input name="claimed_loss" maxlength="100">{% endif %}
+<label>Email <span class="hint">optional · only for your private link and monitoring alerts</span></label><input name="email" type="email" autocomplete="email">
+<p style="margin-top:22px"><button class="btn" type="submit">Run free screen</button></p>
+</form>
+<div>
+<div class="card"><h3>What happens next</h3><p>About 20 seconds of chain reads. You land on a private results page; the link is the only key to it, so save it.</p></div>
+<div class="card"><h3>What we never ask for</h3><p>No seed phrase, no private key, no wallet connection, no transaction from your wallet. Anyone who asks for those is not us.</p></div>
+</div></div>
 {% endblock %}

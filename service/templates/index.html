@@ -1,12 +1,32 @@
 {% extends "base.html" %}{% block title %}Sleuth · incident screening for Robinhood Chain{% endblock %}{% block body %}
-<h1>Was it a rug? Was my wallet drained?</h1>
-<p>Free, read-only screening of a token launch or a wallet on Robinhood Chain (chain id {{ chain_id }}). You get on-chain facts and three-valued answers (<span class="v YES">YES</span> <span class="v no">no</span> <span class="v unk">unknown (incomplete)</span>), with what was checked and through which block. Nothing is hidden behind a paywall.</p>
-<div class="grid">
-<div class="card"><h3>I was rugged</h3><p>Paste the token address. We identify the launch, decode the launchpad call (including snipe-tax exemption lists), check the first blocks for coordinated buying, and measure whether tracked wallets sold in the last 30 minutes.</p><a class="btn" href="/screen">Run a rug screen</a></div>
-<div class="card"><h3>My wallet was drained <span class="mut">(beta)</span></h3><p>Paste your wallet address and when it happened. We list every token and NFT transfer out, every approval you granted, and whether the account currently delegates to a contract (EIP-7702). We never need your keys.</p><a class="btn" href="/drain">Run a drain screen</a></div>
-</div>
-<h2>Founding case · $29 in USDC</h2>
+<section class="hero">
+<div class="eyebrow">Robinhood Chain · chain id {{ chain_id }}</div>
+<h1>Was it a rug? Was your wallet drained?</h1>
+<p class="lead">A free, read-only screen that answers from the chain itself. Every question gets one of three answers, with the block it was checked through. Nothing is hidden behind a paywall.</p>
+<p><span class="v YES">YES</span> &nbsp;<span class="v no">no</span> &nbsp;<span class="v unk">unknown (incomplete)</span></p>
+</section>
+
+<section class="sec grid two">
+<div class="card"><div class="eyebrow">Token launch</div><h3>I was rugged</h3>
+<p>Paste the token address. We identify the launch, decode the launchpad call including snipe-tax exemption lists, test the first blocks for concentrated early buying, and measure whether tracked wallets sold in the last 30 minutes.</p>
+<p><a class="btn" href="/screen">Run a rug screen</a></p></div>
+<div class="card"><div class="eyebrow">Wallet <span class="tag warn">beta</span></div><h3>My wallet was drained</h3>
+<p>Paste your wallet address and roughly when it happened. We list every token and NFT transfer out, every approval you granted, and whether the account currently delegates to a contract (EIP-7702). We never need your keys.</p>
+<p><a class="btn ghost" href="/drain">Run a drain screen</a></p></div>
+</section>
+
+<section class="sec"><h2>How it works</h2>
+<div class="grid three steps">
+<div class="card"><h3>Screen</h3><p>About 20 seconds of chain reads. You get a private results link; save it, it is not recoverable.</p></div>
+<div class="card"><h3>Read the facts</h3><p>Separate verdicts for selling, early-buy concentration, dev history and wallet links. Gaps are listed, never hidden.</p></div>
+<div class="card"><h3>Go deeper if needed</h3><p>A founding case adds the deep pass, an evidence package with a verifiable hash, and 30 days of monitoring.</p></div>
+</div></section>
+
+<section class="sec"><h2>Founding case</h2>
+<div class="card"><div class="meta"><b>$29 in USDC on Base</b><span>one case · no subscription</span></div>
 <p>If the free screen leaves open questions, a founding case adds a deeper deterministic pass (the developer's history across prior launches, wallet-to-wallet tracing for shared funding and coordinated trading), a private case workspace, a reproducible evidence package (JSON with a verifiable hash, plus HTML), and 30 days of continuous monitoring of the tracked addresses with alerts on finalized blocks.</p>
-<div class="box"><strong>What it is not.</strong> No human investigator, no support desk, no report filing on your behalf, no recovery. Accusations and any external report need human review and your written authorization, and are outside this product today. Read the <a href="/methodology">methodology</a> before paying.</div>
-{% if x402_enabled %}<p class="mut">Agents: <span class="m">POST /v1/screen/token</span> is x402-gated (exact scheme, USDC on Base).</p>{% endif %}
+<div class="note"><strong>What it is not.</strong> No human investigator, no support desk, no report filing on your behalf, no recovery. Accusations and any external report need human review and your written authorization, and are outside this product today. Read the <a href="/methodology">methodology</a> before paying.</div>
+</div>
+{% if x402_enabled %}<p class="mut small">Agents: <span class="m">POST /v1/screen/token</span> is x402-gated (exact scheme, USDC on Base).</p>{% endif %}
+</section>
 {% endblock %}

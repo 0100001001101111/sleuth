@@ -1,8 +1,10 @@
 {% extends "base.html" %}{% block title %}Admin · payments{% endblock %}{% block body %}
-<h1>Payments</h1>{% if error %}<div class="box bad">{{ error }}</div>{% endif %}
-<table><tr><th>created</th><th>case</th><th>product</th><th>amount</th><th>state</th><th>pay to</th><th>tx</th><th>confirm</th></tr>
-{% for p in payments %}<tr><td>{{ p['created_at']|local }}</td><td class="m">{{ p['case_id'] or '—' }}</td><td>{{ p['product'] }}</td><td>{{ p['amount'] }} {{ p['asset'] }}/{{ p['network'] }}</td><td>{{ p['state'] }}</td><td class="m">{{ p['pay_to'] or '' }}</td><td class="m">{{ p['tx_hash'] or '' }}</td>
-<td>{% if p['state'] in ('awaiting','created','verified','settlement_pending') and p['provider']=='manual' %}<form method="post" action="/admin/payments/{{ p['id'] }}/confirm"><input type="hidden" name="csrf" value="{{ csrf }}"><input name="tx_hash" class="m" placeholder="0x… tx hash on Base" required><button class="sec" type="submit">settle</button></form>{% endif %}</td></tr>{% endfor %}
-</table>
-<p class="mut">Operator checks the Base explorer for the USDC transfer to the receive address before confirming. Settling entitles the case (deep pass + 30-day monitoring).</p>
+<div class="eyebrow">Operator</div><h1>Payments</h1>
+{% if error %}<div class="note bad">{{ error }}</div>{% endif %}
+<div class="note info">Check the Base explorer for the USDC transfer to the receive address before confirming. Settling entitles the case (deep pass + 30-day monitoring).</div>
+<div class="tbl"><table><thead><tr><th>created</th><th>case</th><th>product</th><th>amount</th><th>state</th><th>pay to</th><th>tx</th><th>confirm</th></tr></thead><tbody>
+{% for p in payments %}<tr><td class="small">{{ p['created_at']|local }}</td><td class="m">{{ (p['case_id'] or '—')[:8] }}</td><td>{{ p['product'] }}</td><td>{{ p['amount'] }} {{ p['asset'] }}<span class="mut">/{{ p['network'] }}</span></td><td><span class="tag {{ 'ok' if p['state'] in ('settled','entitled') else 'neutral' }}">{{ p['state'] }}</span></td><td class="m">{{ (p['pay_to'] or '')|short }}</td><td class="m">{{ (p['tx_hash'] or '')|short }}</td>
+<td>{% if p['state'] in ('awaiting','created','verified','settlement_pending') and p['provider']=='manual' %}<form method="post" action="/admin/payments/{{ p['id'] }}/confirm" style="display:flex;gap:6px;min-width:280px"><input type="hidden" name="csrf" value="{{ csrf }}"><input name="tx_hash" class="m" placeholder="0x… tx hash on Base" required><button class="btn sm" type="submit">settle</button></form>{% endif %}</td></tr>
+{% else %}<tr><td colspan="8" class="mut">No payments yet.</td></tr>{% endfor %}
+</tbody></table></div>
 {% endblock %}
