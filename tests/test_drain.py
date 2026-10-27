@@ -18,6 +18,10 @@ FUNDER = "0x4444000000000000000000000000000000000008"
 POISON = "0xa0b8000000000000000000000000000000000009"    # recipient look-alike of USDC? no: a poisoner
 SCAMBOT = "0x80d0000000000000000000000000000000000010"
 OTHERV = "0x9999000000000000000000000000000000000011"
+HOP = "0x3863000000000000000000000000000000000015"       # the address ATT rehearses with after the loss
+BINANCE = "0x4976000000000000000000000000000000000016"   # tagged exchange hot wallet: HOP's first funding
+NEXT = "0xd45b000000000000000000000000000000000017"
+T_H1, T_H2, T_H3 = "2026-10-25T13:27:35.000000Z", "2026-10-26T07:33:11.000000Z", "2026-10-27T04:39:59.000000Z"
 USDC = "0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48"
 FAKE_USDC = "0x3adf000000000000000000000000000000000012"
 FAKE_ETH = "0x985b000000000000000000000000000000000013"
@@ -63,7 +67,13 @@ PAGES_1 = {
     (V, "internal-transactions"): [],
     (ATT, "transactions"): [tx(ATT, "0xca11bde05977b3631167028862be2a173976ca11", 0, T_SWEEP, TX1, typ="4"),
                             tx(ATT, RAILGUN, 10**18, "2026-10-24T01:00:00.000000Z", TX5, to_meta={"name": "Railgun: Relay Adapt", "is_contract": True})],
-    (ATT, "token-transfers"): [tt(V, ATT, 1000_000000, T_SWEEP, TX1), tt(ATT, RAILGUN, 900_000000, "2026-10-24T01:00:00.000000Z", TX5)],
+    (ATT, "token-transfers"): [tt(V, ATT, 1000_000000, T_SWEEP, TX1), tt(ATT, RAILGUN, 900_000000, "2026-10-24T01:00:00.000000Z", TX5),
+                              tt(ATT, HOP, 500_000, T_H1, "0x" + "e" * 64), tt(ATT, HOP, 1_000000, T_H2, "0x" + "f" * 64),
+                              tt(ATT, HOP, 1_000000, T_H2, "0x" + "9" * 64, token=FAKE_USDC)],      # a fake "USDC" to HOP: never a swept asset
+    (HOP, "transactions"): [tx(HOP, ATT, 0, "2026-10-25T13:36:11.000000Z", "0x" + "1" * 64),
+                            tx(BINANCE, HOP, 3596200000000000, "2026-02-05T22:35:47.000000Z", "0x" + "2" * 64,
+                               from_meta={"metadata": {"tags": [{"name": "Binance: Hot Wallet"}, {"name": "Exchange"}]}})],
+    (HOP, "token-transfers"): [tt(ATT, HOP, 500_000, T_H1, "0x" + "e" * 64), tt(HOP, NEXT, 1_000000, T_H3, "0x" + "3" * 64)],
     (ATT, "internal-transactions"): [it(RELAY, ATT, 2 * 10**16, "2026-10-22T00:00:00.000000Z", "0x" + "d" * 64)],
 }
 ADDR_1 = {
@@ -71,8 +81,10 @@ ADDR_1 = {
     DELEG: {"hash": DELEG, "is_contract": True, "is_verified": False, "name": None},
     ATT: {"hash": ATT, "is_contract": False, "coin_balance": "5"},
     RELAY: {"hash": RELAY, "is_contract": True, "name": "Railgun: Relay Adapt"},
+    HOP: {"hash": HOP, "is_contract": False, "coin_balance": "1"},
 }
-COUNTERS_1 = {V: {"transactions_count": "2", "token_transfers_count": "6"}, ATT: {"transactions_count": "2", "token_transfers_count": "2"}}
+COUNTERS_1 = {V: {"transactions_count": "2", "token_transfers_count": "6"}, ATT: {"transactions_count": "2", "token_transfers_count": "2"},
+              HOP: {"transactions_count": "2", "token_transfers_count": "2"}}
 
 
 class FakeClient:
@@ -110,7 +122,7 @@ class FakeClient:
         if parts[0] == "addresses" and parts[2] == "token-balances":
             return [{"token": {"address_hash": USDC, "symbol": "USDC", "decimals": "6"}, "value": "100000000"}] if parts[1].lower() == ATT else []
         if parts[0] == "smart-contracts":
-            return {"deployed_bytecode": "0x6080604052" + "ab" * 100}
+            return {"deployed_bytecode": "0x6080604052" + "ab" * 100, **self.addrs.get("sc:" + parts[1].lower(), {})}
         if parts[0] == "transactions":
             return self.full.get(parts[1].lower())
         return None
@@ -179,7 +191,8 @@ def test_mechanisms_quarantine_ties_and_verdicts():
     assert s["swept_in"][USDC]["raw"] == str(1000_000000) and s["delegates"][0]["addr"] == DELEG   # OTHERV's 5 USDC is its own loss
     assert s["swept_assets_victim"] == [USDC] and s["loss_time_known"] is True
     assert s["holds"][USDC]["symbol"] == "USDC" and s["holds"][USDC]["decimals"] == 6      # metadata from the loss rows, not "0 raw ?"
-    assert [o["kind"] for o in s["outbound"]] == ["privacy_pool"] and s["outbound"][0]["native_raw"] == str(10**18)
+    assert [o["kind"] for o in s["outbound"]] == ["unknown", "privacy_pool"]        # HOP (2 rehearsal sends) ranks above Railgun (1)
+    assert s["outbound"][1]["native_raw"] == str(10**18)
     assert s["first_funding"]["from"] == RELAY and s["first_funding"]["via"] == "internal"
     assert out["complete"] is True and out["gaps"] == []
 
@@ -410,3 +423,103 @@ def test_first_page_provider_failure_is_a_provider_gap():
     kinds = {(g["kind"], g["chain_id"]) for g in out["gaps"] if "token-transfers" in g["detail"]}
     assert ("provider", "1") in kinds and ("truncated", "1") not in kinds
     assert out["verdict"]["assets_left_wallet"] is not False
+
+
+def test_next_hop_profiled_back_to_exchange_funding_and_rehearsal():
+    """The recipient paid HOP two tiny amounts of the swept asset after the loss (rehearsal), HOP answered with a
+    transaction, HOP was first funded by a tagged exchange hot wallet and passed USDC on. All of it stated three-valued;
+    the fake 'USDC' row is matched by contract, so it never counts."""
+    c1, chains = _chains()
+    out = drain.investigate(c1, V, chains=chains)
+    att = next(s for s in out["suspects"] if s["addr"] == ATT)
+    row = next(r for r in att["outbound"] if r["addr"] == HOP)
+    assert [t["raw"] for t in row["transfers"]] == ["500000", "1000000"] and row["rehearsal"] is True
+    assert att["next_hop_candidates"] == [HOP]                      # RAILGUN is a privacy pool: a sink, not a hop
+    hop = next(h for h in out["next_hops"] if h["addr"] == HOP)
+    assert hop["origin"] == ATT and hop["rehearsal"] is True and hop["complete"] is True
+    assert hop["first_funding"]["kind"] == "exchange" and "Binance" in hop["first_funding"]["label"]
+    assert hop["first_funding"]["earliest_page_only"] is False
+    assert hop["contact_back"]["ts"].startswith("2026-10-25T13:36")
+    assert [s["kind"] for s in hop["services"]] == ["exchange"] and hop["services"][0]["direction"] == ["in"]
+    assert hop["forwarded"][0]["to"] == NEXT and hop["forwarded"][0]["raw"] == "1000000"
+    v = out["verdict"]
+    assert v["recipient_rehearsal_sends"] is True
+    assert v["next_hop_first_funded_by_exchange"] is True and v["next_hop_touched_exchange"] is True
+
+
+def test_next_hop_negatives_unknown_when_pages_truncated():
+    c1, chains = _chains(truncate=((HOP, "transactions"),))
+    out = drain.investigate(c1, V, chains=chains)
+    hop = next(h for h in out["next_hops"] if h["addr"] == HOP)
+    assert hop["complete"] is False and hop["first_funding"]["earliest_page_only"] is True
+    assert out["verdict"]["next_hop_first_funded_by_exchange"] is None      # the oldest page was not reached: an older funder could exist
+    assert out["verdict"]["next_hop_touched_exchange"] is True
+    c1, chains = _chains()
+    c1.pages[(HOP, "transactions")] = [tx(FUNDER, HOP, 10**15, "2026-02-05T22:35:47.000000Z", "0x" + "4" * 64)]
+    c1.truncate.add((HOP, "transactions"))
+    out = drain.investigate(c1, V, chains=chains)
+    assert out["verdict"]["next_hop_first_funded_by_exchange"] is None and out["verdict"]["next_hop_touched_exchange"] is None
+
+
+def test_bundler_submitter_is_a_service_not_a_suspect():
+    """An ERC-4337 bundler submitted the sweep: it is labelled a service, not profiled, and answers no suspect question."""
+    addrs = {**ADDR_1, ATT: {"hash": ATT, "is_contract": False, "coin_balance": "5", "metadata": {"tags": [{"name": "Bundler: 0x02b...002"}]}}}
+    c1 = FakeClient("1", PAGES_1, addrs, COUNTERS_1, FULL)
+    out = drain.investigate(c1, V, chains={"1": c1, "4663": FakeClient("4663", {}, {}, {}, {})})
+    att = next(s for s in out["suspects"] if s["addr"] == ATT)
+    assert att["kind"] == "bundler" and att["service"] is True and att["complete"] is True and att["outbound"] == []
+    assert "not a party" in att["notes"][0]
+    assert out["verdict"]["other_wallets_authorized_to_same_submitter"] is False   # answered by SPENDER alone, the only real submitter
+    assert out["delegations"]["1"]["set_by_kind"] == "bundler"
+    assert out["next_hops"] == []                                    # a service is never followed
+
+
+def test_verified_delegate_hardcoded_receiver_is_named():
+    rec = "0x14f9000000000000000000000000000000000018"
+    addrs = {**ADDR_1, DELEG: {"hash": DELEG, "is_contract": True, "is_verified": True, "name": "EIP7702Delegate", "creator_address_hash": rec},
+             "sc:" + DELEG: {"is_verified": True, "source_code": "contract EIP7702Delegate { address public constant RECEIVER = 0x14F9000000000000000000000000000000000018;\n"
+                                            "address public constant ZERO = 0x0000000000000000000000000000000000000000; }"}}
+    c1 = FakeClient("1", PAGES_1, addrs, COUNTERS_1, FULL)
+    out = drain.investigate(c1, V, chains={"1": c1, "4663": FakeClient("4663", {}, {}, {}, {})})
+    d = out["delegations"]["1"]
+    assert d["creator"] == rec and d["forwards_to"] == [{"name": "RECEIVER", "addr": rec, "is_creator": True}]
+    assert drain._hardcoded_addresses(None) == [] and drain._hardcoded_addresses("no constants here") == []
+
+
+DAI = "0x6b175474e89094c44da98b954eedeac495271d0f"
+
+
+class _SwappedClient(FakeClient):
+    """ATT holds DAI (the swap output), no USDC left: balances come from the explorer, so the fake must say so."""
+
+    def get(self, path, params=None, soft=False, **kw):
+        if "token-balances" in path and path.split("/")[2].lower() == ATT:
+            return [{"token": {"address_hash": DAI, "symbol": "DAI", "decimals": "18"}, "value": str(98_000 * 10**18)}]
+        return super().get(path, params, soft, **kw)
+
+
+def test_swap_output_is_followed_like_the_swept_asset():
+    """ATT swapped the swept USDC into DAI in one transaction, then sent HOP 1 DAI and 10 DAI. DAI never left the victim,
+    but it is the loot in a new coat: the rehearsal is detected on it and HOP is profiled. This is the exact shape of
+    the real case the first automated pass missed; a symbol-only match on a fake 'DAI' row never counts."""
+    cfg = {"chains": {**CFG["chains"], "1": {**CFG["chains"]["1"], "canonical_tokens": {"USDC": USDC, "DAI": DAI}}}}
+    swap = "0x" + "a" * 64
+    pages = {k: list(v) for k, v in PAGES_1.items()}
+    pages[(ATT, "token-transfers")] = [tt(V, ATT, 1000_000000, T_SWEEP, TX1),
+                                      tt(ATT, DEX, 999_000000, "2026-10-24T01:00:00.000000Z", swap), tt(DEX, ATT, 998 * 10**18, "2026-10-24T01:00:00.000000Z", swap, token=DAI, sym="DAI", dec="18"),
+                                      tt(ATT, HOP, 10**18, T_H1, "0x" + "e" * 64, token=DAI, sym="DAI", dec="18"),
+                                      tt(ATT, HOP, 10 * 10**18, T_H2, "0x" + "f" * 64, token=DAI, sym="DAI", dec="18"),
+                                      tt(ATT, NEXT, 10**18, T_H2, "0x" + "9" * 64, token=FAKE_USDC, sym="DAI", dec="18")]   # fake "DAI": not followed
+    pages[(HOP, "token-transfers")] = [tt(ATT, HOP, 10**18, T_H1, "0x" + "e" * 64, token=DAI, sym="DAI", dec="18"),
+                                      tt(HOP, NEXT, 10 * 10**18, T_H3, "0x" + "b" * 64, token=DAI, sym="DAI", dec="18")]
+    c1 = _SwappedClient("1", pages, ADDR_1, COUNTERS_1, FULL)
+    c1.cfg, c1.chain = cfg, cfg["chains"]["1"]
+    out = drain.investigate(c1, V, chains={"1": c1, "4663": FakeClient("4663", {}, {}, {}, {})})
+    att = next(s for s in out["suspects"] if s["addr"] == ATT)
+    assert list(att["converted"]) == [DAI] and att["holds"][DAI]["raw"] == str(98_000 * 10**18)
+    row = next(r for r in att["outbound"] if r["addr"] == HOP)
+    assert [t["symbol"] for t in row["transfers"]] == ["DAI", "DAI"] and row["rehearsal"] is True
+    assert att["next_hop_candidates"] == [HOP]                     # the fake-"DAI" destination is not a candidate
+    hop = next(h for h in out["next_hops"] if h["addr"] == HOP)
+    assert hop["forwarded"][0]["to"] == NEXT and hop["forwarded"][0]["raw"] == str(10 * 10**18)
+    assert out["verdict"]["recipient_rehearsal_sends"] is True

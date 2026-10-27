@@ -37,6 +37,7 @@ Identity of a token is (chain, contract address), never a symbol. Amounts stay r
 Ownership of any address is unknown unless the chain shows it (a creator relation, a self-funding loop).
 """
 import hashlib
+import re
 import time
 import unicodedata
 from concurrent.futures import ThreadPoolExecutor
@@ -54,6 +55,10 @@ _PRIVACY = ("railgun", "tornado", "mixer", "privacy")
 _EXCHANGE = ("binance", "coinbase", "kraken", "okx", "bybit", "kucoin", "gate.io", "htx", "huobi", "bitget", "mexc", "crypto.com",
              "bitfinex", "gemini", "exchange", "hot wallet", "robinhood")
 _BRIDGE = ("bridge", "relay", "across", "stargate", "hop protocol", "wormhole", "layerzero", "cctp", "solver")
+_SERVICE = ("bundler", "entry point", "paymaster")   # ERC-4337 relays: a service many wallets pay, never a party to a loss
+HOP_CAP = 3                    # next-hop addresses profiled per run: the addresses a loss recipient pays afterwards
+HOP_PAGES = 14                 # transaction pages walked per next hop to reach its FIRST funding (about 700 txs)
+_CONSTANT_ADDR = re.compile(r"constant\s+(\w+)\s*=\s*(0x[0-9a-fA-F]{40})")
 _DEX = ("uniswap", "sushiswap", "curve", "balancer", "1inch", "pool manager", "router", "psm", "aggregator", "cow", "dex", "liquidity pool")
 THIRD_PARTY = frozenset({"eip7702_sweep", "allowance_used_by_spender", "permit2_signature_used", "permit_signature_used",
                          "call_into_delegated_account", "third_party_tx_unresolved"})
@@ -90,7 +95,9 @@ def _label(o):
     kind = "unknown"
     if any(w in low for w in _PRIVACY):
         kind = "privacy_pool"
-    elif any(w in low for w in _EXCHANGE):
+    elif any(w in low for w in _SERVICE):
+        kind = "bundler"
+    elif any(w in low for w in _EXCHANGE) or "hot wallet" in low or "deposit address" in low:
         kind = "exchange"
     elif any(w in low for w in _BRIDGE):
         kind = "bridge"
@@ -137,6 +144,23 @@ def _lookalike(a, b):
     return a != b and len(a) == 42 and len(b) == 42 and a[:6] == b[:6] and a[-4:] == b[-4:]
 
 
+def _hardcoded_addresses(src, creator=None):
+    """Addresses baked into a VERIFIED delegate's source as constants (a sweeper's RECEIVER). What the code DOES with them is not
+    established here (an ENTRY_POINT or token constant is not a receiver); they are reported as constants. A sweeper
+    moves. Read from the explorer's source text only; an unverified delegate yields []. The live re-delegation of a drained
+    wallet to a verified "EIP7702Delegate" whose RECEIVER was its own deployer is how this was found by hand (2026-10-27)."""
+    if not isinstance(src, str) or not src:
+        return []
+    seen, out = set(), []
+    for name, addr in _CONSTANT_ADDR.findall(src):
+        a = addr.lower()
+        if a in seen or a == "0x" + "0" * 40:
+            continue
+        seen.add(a)
+        out.append({"name": name, "addr": a, "is_creator": bool(creator) and a == creator})
+    return out[:4]
+
+
 def _code_hash(client, addr, prefetched=None):
     """Deployed bytecode of a contract via the explorer (works for unverified code). (sha256 hex, length) or (None, None)."""
     d = prefetched if isinstance(prefetched, dict) else (client.get(f"/smart-contracts/{addr}", soft=True) or {})
@@ -157,6 +181,7 @@ class _Investigation:
         self._info = {}                    # chain_id -> explorer address record of the victim (presence() fills it)
         self.chains_unread = set()         # active chains skipped (cap, soft deadline, budget, provider): negatives become unknown
         self.suspects_unprofiled = False   # a candidate was capped or ran out of budget: suspect negatives become unknown
+        self.hops_unprofiled = False       # a next hop was not profiled (budget): hop negatives become unknown
         self.t0 = time.time()
         self.soft_deadline = None          # monotonic time after which victim-side reads stop so the suspects get profiled
 
@@ -202,6 +227,9 @@ class _Investigation:
         if not isinstance(raw, list):
             self.gap("provider", f"{what} for {addr[:12]}: unexpected response shape", cl.chain_id)
             return [], False
+        if len(items) != len(raw):            # a malformed row could have been the one that mattered: the page is not complete
+            self.gap("provider", f"{what} for {addr[:12]}: {len(raw) - len(items)} malformed item(s) skipped", cl.chain_id)
+            ok = False
         if not ok and len(cl.errors) > n0:
             self.gap("provider", f"{what} for {addr[:12]}: a page read failed ({len(items)} item(s) kept)", cl.chain_id)
         elif not ok:
@@ -299,11 +327,14 @@ class _Investigation:
                "is_scam": None, "code_len": None, "code_sha256": None}
         if delegated:
             try:
-                d = cl.get(f"/addresses/{impls[0]}", soft=True) or {}
+                d, sc = cl.many([f"/addresses/{impls[0]}", f"/smart-contracts/{impls[0]}"])
+                d, sc = (d if isinstance(d, dict) else {}), (sc if isinstance(sc, dict) else {})
                 out["label"] = _label(d)[0] or None
                 out["verified"] = d.get("is_verified")
                 out["is_scam"] = bool(d.get("is_scam"))
-                out["code_sha256"], out["code_len"] = _code_hash(cl, impls[0])
+                out["code_sha256"], out["code_len"] = _code_hash(cl, impls[0], sc)
+                out["creator"] = (d.get("creator_address_hash") or "").lower() or None
+                out["forwards_to"] = _hardcoded_addresses(sc.get("source_code"), out["creator"]) if sc.get("is_verified") else []   # address constants in verified source; what they are used for is not established here   # a verified sweeper names its receiver
             except _PROVIDER_ERRORS as e:
                 self.gap("provider", f"delegate {impls[0][:12]} not readable on chain {cl.chain_id}: {type(e).__name__}", cl.chain_id)
         return out
@@ -554,6 +585,15 @@ class _Investigation:
             s["is_contract"] = info.get("is_contract")
             s["coin_raw"] = str(_int(info.get("coin_balance"))) if _int(info.get("coin_balance")) is not None else None
             s["tx_count"] = _int(cnt.get("transactions_count"))
+            if s["kind"] == "bundler":
+                # an ERC-4337 bundler relays other people's signed operations for a fee; its 100k+ transactions say nothing
+                # about this case, and naming it as a suspect would point the reader at a service (shared service is not owner)
+                s["service"] = True
+                s["notes"].append("a public bundler (ERC-4337 relay service): it carried the transaction for whoever paid it; "
+                                  "it is not a party to the loss and is not profiled further")
+                s["loss_time_known"] = since_ts is not None
+                s["balances_read"] = isinstance(bal, list)
+                return s
             (txs, ok1), (tts, ok2), (its, ok3) = self.fanout([
                 lambda: self.pages(cl, a, "transactions", PAGES_SUSPECT),
                 lambda: self.pages(cl, a, "token-transfers", PAGES_SUSPECT),
@@ -605,7 +645,7 @@ class _Investigation:
 
             def slot_for(to_obj):
                 return out.setdefault(_h(to_obj), {"addr": _h(to_obj), "label": _label(to_obj)[0], "kind": _label(to_obj)[1], "n": 0, "after_loss_n": 0,
-                                                   "native_raw": 0, "assets": {}, "last": None})
+                                                   "native_raw": 0, "assets": {}, "last": None, "transfers": [], "rehearsal": False})
 
             def after_loss(ts):
                 t = _ts(ts)
@@ -618,6 +658,22 @@ class _Investigation:
                     r["after_loss_n"] += 1 if after_loss(t.get("timestamp")) else 0
                     r["native_raw"] += _int(t.get("value"))
                     r["last"] = max(r["last"] or "", t.get("timestamp") or "")
+                    if NATIVE in swept_assets and after_loss(t.get("timestamp")) and len(r["transfers"]) < 8:    # swept coin, not just tokens
+                        r["transfers"].append({"ts": t.get("timestamp"), "asset": NATIVE, "symbol": cl.chain.get("symbol") or "native", "raw": str(_int(t.get("value"))),
+                                               "decimals": 18, "tx": (t.get("hash") or t.get("transaction_hash") or "").lower()})
+            # proceeds: a canonical asset the suspect RECEIVED in the same tx it sent a swept asset (USDC swapped to DAI) is the
+            # loot in a new coat and is followed exactly like the swept asset, by contract address. Missing this is why the
+            # first automated pass on a real case saw no rehearsal sends: they were in DAI, the swap output.
+            canon_set = set(self.canonical(cl.chain_id).values())
+            swap_txs = {(x.get("transaction_hash") or "").lower() for x in tts if _h(x.get("from")) == a and _tok_addr(_tok(x)) in swept_assets}
+            converted = {}
+            for x in tts:
+                ta = _tok_addr(_tok(x))
+                if _h(x.get("to")) == a and (x.get("transaction_hash") or "").lower() in swap_txs and ta in canon_set and ta not in swept_assets:
+                    converted[ta] = {"symbol": _tok(x).get("symbol"), "decimals": _total(x)[1]}
+            s["converted"] = converted
+            followed = set(swept_assets) | set(converted)
+            trade_txs = {(x.get("transaction_hash") or "").lower() for x in tts if _h(x.get("to")) == a}   # the suspect got something back: a trade, not a payment
             for x in tts:
                 if _h(x.get("from")) == a and _h(x.get("to")):
                     r = slot_for(x.get("to"))
@@ -628,6 +684,9 @@ class _Investigation:
                     slot = r["assets"].setdefault(ta, {"symbol": _tok(x).get("symbol"), "raw": 0, "decimals": dec, "canonical": ta in set(self.canonical(cl.chain_id).values())})
                     slot["raw"] += raw or 0
                     r["last"] = max(r["last"] or "", x.get("timestamp") or "")
+                    if ta in followed and after_loss(x.get("timestamp")) and len(r["transfers"]) < 8 and (x.get("transaction_hash") or "").lower() not in trade_txs:   # by contract, never by symbol; a swap counterparty is not a hop
+                        r["transfers"].append({"ts": x.get("timestamp"), "asset": ta, "symbol": _tok(x).get("symbol"), "raw": str(raw or 0),
+                                               "decimals": dec, "tx": (x.get("transaction_hash") or "").lower()})
             for r in out.values():
                 r["native_raw"] = str(r["native_raw"])
                 r["assets"] = {k: {**v, "raw": str(v["raw"])} for k, v in r["assets"].items()}
@@ -647,16 +706,31 @@ class _Investigation:
                 for b in bal:
                     if isinstance(b, dict):
                         ta = _tok_addr(_tok(b))
-                        if ta in swept_assets or ta in s["swept_in"]:
+                        if ta in swept_assets or ta in s["swept_in"] or ta in converted:
                             s["holds"][ta] = {"symbol": _tok(b).get("symbol"), "raw": str(_int(b.get("value")) or 0), "decimals": _int(_tok(b).get("decimals"))}
                 meta = swept_assets if isinstance(swept_assets, dict) else {}
-                for ta in set(swept_assets) | set(s["swept_in"]):
-                    known = s["swept_in"].get(ta) or meta.get(ta) or {}
+                for ta in set(swept_assets) | set(s["swept_in"]) | set(converted):
+                    known = s["swept_in"].get(ta) or meta.get(ta) or converted.get(ta) or {}
                     s["holds"].setdefault(ta, {"symbol": known.get("symbol"), "raw": "0", "decimals": known.get("decimals")})
                 s["balances_read"] = True
             else:
                 s["balances_read"] = False
                 sg("provider", f"suspect {a[:12]}: token balances unavailable")
+            # rehearsal sends: repeated tiny amounts of a swept asset to one address after the loss (1 then 10 DAI against a
+            # 98,000 DAI balance) are consistent with testing a destination; a later large move is NOT established here. That address is the next
+            # hop, profiled by hop(); services (bridges, exchanges, pools) are sinks, not hops.
+            if NATIVE in swept_assets and s["coin_raw"] is not None:
+                s["holds"][NATIVE] = {"symbol": cl.chain.get("symbol") or "native", "raw": s["coin_raw"], "decimals": 18}
+            for r in out.values():
+                small = []
+                for t in r["transfers"]:
+                    held = _int((s["holds"].get(t["asset"]) or {}).get("raw")) or 0
+                    small.append(held > 0 and int(t["raw"]) * 100 <= held)
+                r["rehearsal"] = len(small) >= 2 and all(small)
+            s["rehearsal_any"] = any(r["rehearsal"] for r in out.values())        # over EVERY destination, not the 15 shown
+            ranked = [r for r in sorted(out.values(), key=lambda r: (-int(r["rehearsal"]), -r["after_loss_n"])) if r["transfers"] and r["kind"] in ("eoa", "unknown")]
+            s["next_hop_candidates"] = [r["addr"] for r in ranked]                  # uncapped; investigate() caps and records the gap
+            s["next_hop_rows"] = {r["addr"]: {"transfers": r["transfers"], "rehearsal": r["rehearsal"]} for r in ranked}
             s["complete"] = ok1 and ok2 and ok3 and problems == 0
         except BudgetExceeded:
             self.exhausted = True
@@ -666,6 +740,70 @@ class _Investigation:
             s["complete"] = False
             sg("provider", f"suspect {a[:12]}: {type(e).__name__}: {str(e)[:100]}")
         return s
+
+    def hop(self, cl, addr, origin, swept_assets, since_ts, transfers, rehearsal=False):
+        """Profile a NEXT hop: an address a loss recipient paid after the loss. The question is who it is, not what it
+        holds: its FIRST funding (pages walked back to the oldest; an exchange hot wallet there is the one record a legal
+        request can reach), the labelled services it touched, whether it sent anything back to the recipient (two-way
+        contact) and whether it passed the asset on. Every statement carries how far the pages were read."""
+        a = addr.lower()
+        h = {"addr": a, "chain_id": cl.chain_id, "origin": origin, "received": transfers, "rehearsal": bool(rehearsal), "label": None, "kind": None,
+             "is_contract": None, "tx_count": None, "first_funding": None, "services": [], "contact_back": None, "forwarded": [],
+             "pages_complete": False, "complete": False}
+        try:
+            cl.check_budget()
+            info, cnt = cl.many([f"/addresses/{a}", f"/addresses/{a}/counters"])
+            info, cnt = (info if isinstance(info, dict) else {}), (cnt if isinstance(cnt, dict) else {})
+            h["label"], h["kind"] = _label(info)
+            h["is_contract"] = info.get("is_contract")
+            h["tx_count"] = _int(cnt.get("transactions_count"))
+            n0 = len(self.gaps)
+            (txs, ok1), (tts, ok2) = self.fanout([lambda: self.pages(cl, a, "transactions", HOP_PAGES),
+                                                  lambda: self.pages(cl, a, "token-transfers", PAGES_SUSPECT)])
+            h["pages_complete"] = ok1
+            svc = {}
+            for t in [x for x in txs if x.get("status") in (None, "ok")] + tts:     # token rows carry no status; failed txs are not contact
+                for side in ("from", "to"):
+                    o = t.get(side) if isinstance(t.get(side), dict) else {}
+                    oa = _h(o)
+                    if not oa or oa == a:
+                        continue
+                    text, kind = _label(o)
+                    if kind in ("exchange", "bridge", "privacy_pool"):
+                        slot = svc.setdefault(oa, {"addr": oa, "label": text, "kind": kind, "n": 0, "direction": set()})
+                        slot["n"] += 1
+                        slot["direction"].add("in" if side == "from" else "out")
+                if _h(t.get("from")) == a and _h(t.get("to")) == origin and t.get("status") in (None, "ok") and h["contact_back"] is None:
+                    h["contact_back"] = {"ts": t.get("timestamp"), "tx": (t.get("hash") or "").lower(), "raw": str(_int(t.get("value")) or 0)}
+            h["services"] = sorted(({**v, "direction": sorted(v["direction"])} for v in svc.values()), key=lambda v: -v["n"])[:10]
+            # first funding = the oldest incoming value on EITHER page type (a token credit can predate the first coin credit);
+            # it is only "first" when both walks reached their oldest page
+            inb = [t for t in txs if _h(t.get("to")) == a and _int(t.get("value")) and t.get("status") in (None, "ok")]
+            inb += [x for x in tts if _h(x.get("to")) == a and (_total(x)[0] or 0) > 0]
+            if inb:
+                f = min(inb, key=lambda t: t.get("timestamp") or "~")
+                text, kind = _label(f.get("from"))
+                is_tok = "transaction_hash" in f
+                h["first_funding"] = {"ts": f.get("timestamp"), "from": _h(f.get("from")), "label": text, "kind": kind,
+                                      "raw": str(_total(f)[0] or 0) if is_tok else str(_int(f.get("value"))),
+                                      "asset": _tok_addr(_tok(f)) if is_tok else NATIVE, "symbol": _tok(f).get("symbol") if is_tok else None,
+                                      "tx": (f.get("transaction_hash") if is_tok else f.get("hash") or "").lower(), "earliest_page_only": not (ok1 and ok2)}
+            for x in tts:
+                ta = _tok_addr(_tok(x))
+                if _h(x.get("from")) == a and ta in swept_assets and _h(x.get("to")) and len(h["forwarded"]) < 8:
+                    ts = _ts(x.get("timestamp"))
+                    if since_ts is None or (ts is not None and ts >= since_ts):
+                        raw, dec = _total(x)
+                        text, kind = _label(x.get("to"))
+                        h["forwarded"].append({"ts": x.get("timestamp"), "to": _h(x.get("to")), "label": text, "kind": kind, "symbol": _tok(x).get("symbol"),
+                                               "raw": str(raw or 0), "decimals": dec, "tx": (x.get("transaction_hash") or "").lower()})
+            h["complete"] = ok1 and ok2 and len(self.gaps) == n0
+        except BudgetExceeded:
+            self.exhausted = True
+            self.gap("budget", f"budget exhausted while profiling next hop {a[:12]}", cl.chain_id)
+        except _PROVIDER_ERRORS as e:
+            self.gap("provider", f"next hop {a[:12]}: {type(e).__name__}: {str(e)[:100]}", cl.chain_id)
+        return h
 
     @staticmethod
     def relate(suspects):
@@ -759,7 +897,7 @@ def investigate(client, victim, incident_ts=None, chains=None, max_chains=2):
     if rem is not None:
         inv.soft_deadline = time.monotonic() + max(0.0, rem) * (1 - SUSPECT_SHARE)
     out = {"rule_version": RULE_VERSION, "collector_version": COLLECTOR_VERSION, "victim": victim, "incident_ts": incident_ts,
-           "presence": {}, "delegations": {}, "chains": [], "quarantine_total": 0, "suspects": [], "relations": [], "verdict": {}, "gaps": inv.gaps,
+           "presence": {}, "delegations": {}, "chains": [], "quarantine_total": 0, "suspects": [], "next_hops": [], "relations": [], "verdict": {}, "gaps": inv.gaps,
            "complete": False, "observed_at": time.time(), "timing_s": {}}
     t0 = time.monotonic()
 
@@ -914,6 +1052,34 @@ def investigate(client, victim, incident_ts=None, chains=None, max_chains=2):
                 s["loss_txs"] = counts[(a, cid)]
                 out["suspects"].append(s)
             lap("suspects_" + "_".join(a[:10] for a, _ in pair))
+        # next hops: the addresses a recipient paid after the loss, rehearsal sends first, profiled from their own pages back to
+        # their FIRST funding. The loot address was seeded through a privacy pool; the address it pays may have been funded by
+        # an exchange withdrawal, the one record outside the chain. Found by hand first (2026-10-27); now part of every run.
+        hop_todo = []
+        for s in out["suspects"]:
+            for a in s.get("next_hop_candidates") or []:
+                if a != victim and all((a, s["chain_id"]) != (x[0], x[1]) for x in hop_todo):
+                    row = (s.get("next_hop_rows") or {}).get(a) or {}
+                    hop_todo.append((a, s["chain_id"], s["addr"], row.get("transfers") or [], row.get("rehearsal", False), set(s.get("converted") or {})))
+        if len(hop_todo) > HOP_CAP:
+            inv.gap("capped", f"{len(hop_todo)} next-hop candidates; the {HOP_CAP} strongest (rehearsal sends first) were profiled")
+            inv.hops_unprofiled = True             # an unprofiled candidate could carry the exchange: negatives become unknown
+            hop_todo = hop_todo[:HOP_CAP]
+        for i in range(0, len(hop_todo), SUSPECT_PAIR):
+            pair = hop_todo[i:i + SUSPECT_PAIR]
+            if inv.exhausted:
+                for a, cid, *_ in pair:
+                    inv.gap("budget", f"next hop {a[:12]} not profiled: budget exhausted", cid)
+                inv.hops_unprofiled = True
+                continue
+            out["next_hops"] += inv.fanout([lambda a=a, cid=cid, o=o, tr=tr, rh=rh, cv=cv: inv.hop(chains[cid], a, o, set(recv_assets.get((o, cid), {})) | cv, first_loss.get(cid), tr, rh)
+                                            for a, cid, o, tr, rh, cv in pair])
+            lap("hops_" + "_".join(a[:10] for a, *_ in pair))
+        # a submitter that is a relay service is named as one wherever the delegation panel cites it
+        kinds = {(s["addr"], s["chain_id"]): (s.get("kind"), s.get("label")) for s in out["suspects"]}
+        for cid, d in out["delegations"].items():
+            if isinstance(d, dict) and d.get("set_by") and (d["set_by"], cid) in kinds:
+                d["set_by_kind"], d["set_by_label"] = kinds[(d["set_by"], cid)]
         out["relations"] = inv.relate(out["suspects"])
     except BudgetExceeded:
         inv.exhausted = True
@@ -959,17 +1125,28 @@ def _verdicts(out, inv):
     if sus or inv.suspects_unprofiled:
         # each question is asked only of the parties whose role can answer it; "no" needs every such party read in full
         # and no candidate left unprofiled (cap or budget)
-        subs = [s for s in sus if "submitter" in (s.get("roles") or [])]
-        recs = [s for s in sus if "recipient" in (s.get("roles") or [])]
+        subs = [s for s in sus if "submitter" in (s.get("roles") or []) and not s.get("service")]   # a bundler answers nothing
+        recs = [s for s in sus if "recipient" in (s.get("roles") or []) and not s.get("service")]
         all_prof = not inv.suspects_unprofiled
+        svc_rec = any(s.get("service") and "recipient" in (s.get("roles") or []) for s in sus)   # a service that RECEIVED answers no recipient question
 
         def ok(group):
             return all_prof and bool(group) and all(s["complete"] for s in group)
+        recs_ok = ok(recs) and not svc_rec
         v["other_wallets_authorized_to_same_submitter"] = tv(any((s.get("other_authorities") or 0) > 0 for s in subs), ok(subs))
         holds = [int(h["raw"]) > 0 for s in recs for ta, h in s["holds"].items() if ta in (s.get("swept_assets_victim") or [])]
-        v["recipient_still_holds_swept_asset"] = tv(any(holds), ok(recs) and all(s.get("balances_read") for s in recs))
+        v["recipient_still_holds_swept_asset"] = tv(any(holds), recs_ok and all(s.get("balances_read") for s in recs))
         v["recipient_sent_to_exchange_bridge_or_privacy_pool"] = tv(any(s.get("sinks_after_loss") for s in recs),
-                                                                    ok(recs) and all(s.get("loss_time_known") for s in recs))
+                                                                    recs_ok and all(s.get("loss_time_known") for s in recs))
+        v["recipient_rehearsal_sends"] = tv(any(s.get("rehearsal_any") for s in recs),
+                                            recs_ok and all(s.get("loss_time_known") and s.get("balances_read") for s in recs))
+        hops = out.get("next_hops") or []
+        if hops or inv.hops_unprofiled:
+            hops_ok = not inv.hops_unprofiled and bool(hops) and all(h.get("complete") for h in hops)
+            walked = [h.get("first_funding") or {} for h in hops if h.get("first_funding") and not h["first_funding"].get("earliest_page_only")]
+            # a "first" funder is only known when the walk reached the oldest page: an older, unseen credit could exist otherwise
+            v["next_hop_first_funded_by_exchange"] = tv(any(f.get("kind") == "exchange" for f in walked), hops_ok and len(walked) == len(hops))
+            v["next_hop_touched_exchange"] = tv(any(sv.get("kind") == "exchange" for h in hops for sv in h.get("services") or []), hops_ok)
     return v
 
 

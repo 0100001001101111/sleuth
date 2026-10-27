@@ -64,6 +64,18 @@ QUESTIONS = {
         "YES": "Yes. The address that submitted the loss transaction also submitted type-4 transactions carrying other accounts' authorizations. Whether anything moved from those accounts was not checked here; who runs the submitter is unknown.",
         "no": "In the transactions read, the submitter carried no other account's authorization.",
         None: "The submitter's history could not be read completely, so this cannot be answered."}),
+    "recipient_rehearsal_sends": ("Did a recipient rehearse a move with small test sends?", {
+        "YES": "Yes. After the loss a recipient sent repeated tiny amounts of a swept asset (or of what it was swapped into) to one address: the shape of testing a destination. A later large move is not established by this; that address is profiled as a next hop.",
+        "no": "No repeated small sends of a swept asset were found in the recipients' pages read.",
+        None: "Recipient pages or balances could not be read completely, so this cannot be answered."}),
+    "next_hop_first_funded_by_exchange": ("Was a next hop first funded by an exchange?", {
+        "YES": "Yes. An address a recipient paid after the loss received its very first funds from a labelled exchange hot wallet. The exchange holds the account record for that withdrawal: a lead for a law-enforcement request, not a name, and it says who funded that address, not who ran the loot wallet.",
+        "no": "Every next hop was read back to its first funding and none came from a labelled exchange.",
+        None: "A next hop's history could not be walked back to its first funding, so this cannot be answered."}),
+    "next_hop_touched_exchange": ("Has a next hop dealt with an exchange?", {
+        "YES": "Yes. A next hop has sent to or received from a labelled exchange address in the pages read.",
+        "no": "In the pages read, no next hop dealt with a labelled exchange.",
+        None: "Next-hop pages could not be read completely, so this cannot be answered."}),
     "recipient_still_holds_swept_asset": ("Does a recipient still hold what was taken?", {
         "YES": "Yes. At least one recipient's balance still contained an asset that left this wallet when read. A balance is a fact about that moment, not a promise it stays.",
         "no": "No recipient held any of this wallet's swept assets when read.",
@@ -178,6 +190,18 @@ def gap_text(gap):
     return raw, raw
 
 
+def _amt(raw, decimals):
+    """Human amount from a raw integer string; falls back to the raw figure when decimals are unknown."""
+    try:
+        n, d = int(raw or 0), int(decimals) if decimals is not None else None
+    except (TypeError, ValueError):
+        return str(raw)
+    if d is None:
+        return f"{n} raw"
+    q = n / (10 ** d)
+    return f"{q:,.6f}".rstrip("0").rstrip(".") if q else "0"
+
+
 def _when(ts):
     """' (2026-10-27 05:12 UTC)' for an epoch observed_at, or '' when unknown: evidence is dated, never 'now'."""
     try:
@@ -220,6 +244,37 @@ def _investigation_words(v, inv):
         out.append("In the pages read, no recipient sent to a labelled exchange, bridge or privacy pool.")
     if v.get("other_wallets_authorized_to_same_submitter") == "YES":
         out.append("The same submitter address carried authorizations from other wallets too; whether their assets moved was not checked.")
+    # next hops: the addresses a recipient paid afterwards, read back to their first funding (the exchange lead lives there)
+    for hp in inv.get("next_hops") or []:
+        if not isinstance(hp, dict):
+            continue
+        got = [t for t in hp.get("received") or [] if isinstance(t, dict)]
+        amts = ", ".join(f"{_amt(t.get('raw'), t.get('decimals'))} {t.get('symbol') or '?'} on {(t.get('ts') or '')[:10]}" for t in got[:4])
+        s = f"Recipient {(hp.get('origin') or '')[:12]}… then paid {(hp.get('addr') or '')[:12]}…" + (f" ({amts})" if amts else "")
+        s += ", repeated small amounts: the shape of testing a destination (a later large move is not established)." if hp.get("rehearsal") else "."
+        cb = hp.get("contact_back")
+        if isinstance(cb, dict):
+            s += f" {(hp.get('addr') or '')[:12]}… has also sent a transaction back to it ({(cb.get('ts') or '')[:16].replace('T', ' ')} UTC): traffic in both directions."
+        ff = hp.get("first_funding") if isinstance(hp.get("first_funding"), dict) else None
+        if ff and ff.get("kind") == "exchange":
+            s += (f" It was first funded on {(ff.get('ts') or '')[:10]} by {ff.get('label') or (ff.get('from') or '')[:12]}: an exchange withdrawal. "
+                  "The exchange holds the account record for that withdrawal; that is a lead for a law-enforcement request, not a name, "
+                  "and it says who funded this address, not who ran the loot wallet.")
+        elif ff:
+            s += (f" It was first funded on {(ff.get('ts') or '')[:10]} by {ff.get('label') or (ff.get('from') or '')[:12] + '…'}"
+                  + (" (earliest page read only)." if ff.get("earliest_page_only") else "."))
+        else:
+            s += " Its first funding was not found in the pages read."
+        ex = [sv for sv in hp.get("services") or [] if isinstance(sv, dict) and sv.get("kind") == "exchange"]
+        if ex:
+            s += " It has dealt with " + ", ".join(sv.get("label") or (sv.get("addr") or "")[:12] for sv in ex[:3]) + "."
+        fw = next((f for f in hp.get("forwarded") or [] if isinstance(f, dict)), None)
+        if fw:
+            s += (f" It passed {_amt(fw.get('raw'), fw.get('decimals'))} {fw.get('symbol') or '?'} on to {(fw.get('to') or '')[:12]}…"
+                  + (f" ({fw['label']})" if fw.get("label") else "") + f" on {(fw.get('ts') or '')[:10]}.")
+        if not hp.get("complete"):
+            s += " This hop was only partly read."
+        out.append(s)
     # the delegation check covers every chain the explorer knows the address on, including chains too quiet to be read
     # Every live delegation is named with its chain: a wallet swept on two chains is usually still delegated on both,
     # and the one installed by the sweep is the open door whatever its name.
@@ -238,6 +293,15 @@ def _investigation_words(v, inv):
             s += " A verified source and a tidy name do not make it safe: drainer kits verify their delegates too. If you did not set it yourself, it is the open door."
         else:
             s += " An unverified delegate is the open door."
+        fwd = [f for f in d.get("forwards_to") or [] if isinstance(f, dict) and f.get("addr")]
+        if fwd:
+            s += (f" Its verified source hard-codes the address {fwd[0]['addr'][:12]}… as {fwd[0].get('name') or '?'}"
+                  + (", the address that deployed it" if fwd[0].get("is_creator") else "") + "; what the code does with it was not established here.")
+        if d.get("set_by_kind") == "bundler":
+            s += " The submitter is a public bundler, a relay service many wallets use: it carried the transaction, it is not the person behind it."
+        if not d.get("set_in_loss_tx"):
+            s += (" No transaction read by this run installed it: a delegation can be set by a transaction that moves nothing, which does not "
+                  "appear in this wallet's own list, so who installed it is unknown.")
         out.append(s)
     if live:
         out.append("Revoking token approvals does nothing about a delegation. Move what is left to a fresh key, and clear the delegation "

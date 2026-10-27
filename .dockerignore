@@ -1,0 +1,11 @@
+.git
+.venv
+data
+tests
+docs
+__pycache__
+*.pyc
+.pytest_cache
+config.json
+_review_*.md
+_review_*.patch

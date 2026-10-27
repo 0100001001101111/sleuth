@@ -52,7 +52,8 @@ stays unset until B-2 is decided.
 | [08-decisions-for-bo.md](08-decisions-for-bo.md) | Decisions only Bo can make |
 | [09-design-record.md](09-design-record.md) | Codex/Claude disagreement and resolution record |
 | [10-research-notes.md](10-research-notes.md) | RPC measurements, launchpad calldata, market, x402, reporting channels, licensing, EIP-7702 |
-| [11-running.md](11-running.md) | Running the implemented pilot locally: env vars, tests, admin, limits |
+| [11-running.md](11-running.md) | Running the implemented pilot locally: env vars, tests, admin, limits; Fly.io deploy recipe |
+| [12-investigation-protocol.md](12-investigation-protocol.md) | The drain investigation standard: contract-address identity, services vs parties, rehearsal sends, next hops read to first funding, delegate source constants |
 | [design-rounds/](design-rounds/) | The seven round files, verbatim |
 
 ## What this phase does not authorize

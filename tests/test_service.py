@@ -328,10 +328,18 @@ def _fake_run_job(cfg, kind, payload, budget_s=None):
                              "other_authorities": 8, "authorities_sample": ["0x" + "5" * 40], "delegates": [], "swept_in": {}, "holds": {}, "balances_read": True,
                              "outbound": [{"addr": "0x" + "6" * 40, "kind": "privacy_pool", "label": "Railgun: Relay Adapt", "n": 1, "native_raw": "1000000000000000000", "assets": {}, "last": None}],
                              "first_funding": None, "notes": []}],
+               "next_hops": [{"addr": "0x" + "3" * 40, "chain_id": "1", "origin": OTHER, "kind": "eoa", "label": None, "tx_count": 691, "complete": True, "rehearsal": True,
+                              "received": [{"ts": "2026-10-25T13:27:35.000000Z", "symbol": "DAI", "raw": "1000000000000000000", "decimals": 18},
+                                           {"ts": "2026-10-26T07:33:11.000000Z", "symbol": "DAI", "raw": "10000000000000000000", "decimals": 18}],
+                              "contact_back": {"ts": "2026-10-25T13:36:11.000000Z", "tx": "0x" + "2" * 64, "raw": "0"},
+                              "first_funding": {"ts": "2026-02-05T22:35:47.000000Z", "from": "0x" + "4" * 40, "label": "Binance: Hot Wallet | Exchange", "kind": "exchange", "raw": "3596200000000000", "earliest_page_only": False},
+                              "services": [{"addr": "0x" + "4" * 40, "label": "Binance: Hot Wallet | Exchange", "kind": "exchange", "n": 1, "direction": ["in"]}],
+                              "forwarded": [{"ts": "2026-10-27T04:39:59.000000Z", "to": "0x" + "d" * 40, "label": "", "kind": "unknown", "symbol": "DAI", "raw": "10000000000000000000", "decimals": 18}]}],
                "relations": [], "gaps": [], "complete": True, "observed_at": 1793077200.0,
                "delegations": {"1": {"known": True, "delegated": True, "delegate": "0x" + "7" * 40, "verified": False, "set_in_loss_tx": "0x" + "1" * 64, "set_by": OTHER}, "4663": {"known": True, "delegated": False}},
                "verdict": {"assets_left_wallet": True, "eip7702_authorization_by_wallet_submitted_by_other": True, "wallet_key_signed_outflow": False,
-                           "wallet_currently_delegated": True, "recipient_sent_to_exchange_bridge_or_privacy_pool": True, "other_wallets_authorized_to_same_submitter": True}}
+                           "wallet_currently_delegated": True, "recipient_sent_to_exchange_bridge_or_privacy_pool": True, "other_wallets_authorized_to_same_submitter": True,
+                           "recipient_rehearsal_sends": True, "next_hop_first_funded_by_exchange": True, "next_hop_touched_exchange": True}}
         return "succeeded", {"job": kind, "victim": payload["victim"], "chain_id": payload["chain_id"], "complete": True, "checked_through": 126, "gaps": [], "investigation": inv}
     if kind == "tx_explain":
         return "succeeded", {"job": kind, "tx": payload["tx"], "chain_id": payload["chain_id"], "complete": True, "checked_through": 127, "gaps": [],
@@ -359,6 +367,10 @@ def test_drain_follow_up_investigation_and_delegation_warning(web, conn, monkeyp
     assert "eip7702 sweep" in page and "privacy pool" in page and "8</b> other wallet(s)" in page
     assert "STILL delegated" in page and "when checked (2026-10-27 05:00 UTC)" in page      # plain-language layer repeats the warning, dated
     assert page.count("set in loss transaction") >= 2 and "it is the open door" in page       # red box and plain words both name the origin
+    assert "Next hops" in page and "the shape of testing a destination" in page and "an exchange withdrawal" in page
+    assert "then paid 0x3333333333" in page and "traffic in both directions" in page and "1 DAI on 2026-10-25, 10 DAI on 2026-10-26" in page
+    assert "a lead for a law-enforcement request, not a name" in page and "Passed on: 10.000000 DAI" in page
+    assert "who did is unknown" not in page                                                     # the origin of this delegation is known
     assert "1 third-party move(s) that followed this wallet's own exact-amount approval (listed, not counted as loss)" in page   # table
     assert "1 third-party move(s) followed this wallet&#39;s own exact-amount approval" in page                                   # plain words (escaped)
     assert "Nothing was checked" not in page

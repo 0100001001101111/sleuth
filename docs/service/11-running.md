@@ -37,3 +37,22 @@ dependency.
   checked out (400).
 - Backups: `service.db.backup(conn, dest)` uses SQLite's online backup API; never copy the file while running.
 - Expose only behind TLS and a reverse proxy; the case capability token travels in the URL.
+
+## Deploying to Fly.io (IMPLEMENTED 2026-10-27)
+
+`Dockerfile`, `.dockerignore`, `requirements.txt` and `fly.toml` at the repo root build one machine (shared-cpu-1x,
+512 MB, region sjc) with a 1 GB volume mounted at `/data` (`SLEUTH_HOME`), the worker in-process, HTTPS forced and
+`/healthz` as the health check. Docker is not needed locally: `fly deploy` uses Fly's remote builder.
+
+```bash
+fly apps create sleuth-cases
+fly volumes create sleuth_data --region sjc --size 1 -y
+fly secrets set SLEUTH_ADMIN_PASSWORD="$(cat ~/.sleuth_admin_password)"   # generate it first; never commit or paste it
+fly deploy --ha=false
+curl -s https://sleuth-cases.fly.dev/healthz
+```
+
+Notes: `auto_stop_machines` is off because the queue worker must keep running; a redeploy kills in-flight runs, which sit
+leased for 300 s before retry. `SLEUTH_PAY_TO_BASE_USDC` stays unset (checkout disabled) until decision B-2. No config.json is
+shipped; the chain defaults in `sleuth/config.py` apply. Backups: `fly ssh console -C "python -c ..."` with
+`service.db.backup`, or snapshot the volume.

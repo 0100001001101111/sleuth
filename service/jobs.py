@@ -18,7 +18,7 @@ SCREEN_BUDGET_S = 20.0
 DEEP_BUDGET_S = 240.0
 MONEY_BUDGET_S = 150.0   # explorer pages cost ~2-3 s each; 5 wallets x 6 pages plus hops
 MONEY_MAX_WALLETS = 5
-INVESTIGATE_BUDGET_S = 200.0   # presence on every configured chain, pages + concurrent tx fetches on two chains, 4 suspects; queue lease is 300 s
+INVESTIGATE_BUDGET_S = 330.0   # presence on every chain, pages + tx fetches on two chains, 4 suspects, 3 next hops walked to first funding; the worker heartbeats the 300 s lease
 TX_BUDGET_S = 20.0
 PROVIDER_ERRORS = (BudgetExceeded, ApiError, RpcError, OSError, ValueError, TypeError, KeyError)
 
