@@ -512,3 +512,47 @@ def test_db_refuses_old_schema_version(tmp_path):
     c.close()
     with pytest.raises(db.DbError, match="schema version 1"):
         db.connect(p)
+
+
+def test_plain_language_layer_and_incident_time_form(web, conn, monkeypatch):
+    from service import plain
+    from service import worker as W
+    assert plain.question("drain_cause") == "What caused the loss?" and plain.question("some_new_key") == "some new key"
+    assert plain.meaning("drain_cause", "unknown (incomplete)").startswith("Events alone cannot say")
+    assert plain.meaning("never_seen", "YES", "recorded reason") == "recorded reason"
+    assert plain.gap_text("no_trace: internal transfers unknown")[0].startswith("Native-coin moves")
+    assert plain.gap_text({"kind": "truncated", "detail": "x"}) == ("An explorer page was cut short, so part of a wallet's history was not read.", "truncated: x")
+    assert plain.gap_text("something odd") == ("something odd", "something odd")
+    # dropdown and date picker both become a unix time; the raw field (API/tests) still wins; garbage is a readable error
+    assert plain.incident_time("1761480000", "24", "", "America/Los_Angeles") == (1761480000.0, None)
+    assert plain.incident_time("", "24", "", "America/Los_Angeles", now=1_000_000) == (1_000_000 - 86400, 24)
+    ts, h = plain.incident_time("", "exact", "2026-10-26T15:00", "America/Los_Angeles")
+    assert h is None and ts == 1793052000.0  # 2026-10-26 15:00 PDT = 22:00 UTC
+    assert plain.incident_time("", "", "", "America/Los_Angeles") == (None, None)
+    # a stale picker value must not override the dropdown; bad inputs are readable errors, never silent defaults
+    assert plain.incident_time("", "6", "2020-01-01T00:00", "America/Los_Angeles", now=1_000_000) == (1_000_000 - 6 * 3600, 6)
+    for raw, when, local in [("", "exact", "yesterday-ish"), ("", "exact", ""), ("", "exact", "2026-10-26T15:00+00:00"),
+                             ("", "exact", "2026-03-08T02:30"), ("nan", "", ""), ("inf", "", ""), ("-5", "", "")]:
+        with pytest.raises(ValueError):
+            plain.incident_time(raw, when, local, "America/Los_Angeles")
+    # no window read (head unavailable) => the summary must not claim anything was checked
+    head_fail = {"victim": VICTIM, "events": [], "gaps": ["head unavailable: boom"], "coverage": None, "input": {"incident_ts": None}}
+    s = plain.summary({"kind": "drain"}, head_fail, [{"predicate": "transfer_event_from_victim", "verdict": "unknown (incomplete)"}])
+    assert s == ["Nothing could be checked: the chain could not be read for this run, so no window was scanned."]
+    fell_back = {"victim": VICTIM, "events": [], "gaps": ["time->block lookup failed (RpcError); used a head-relative window"],
+                 "window": {"start": 1, "end": 9}, "input": {"incident_ts": 123.0}}
+    assert plain.summary({"kind": "drain"}, fell_back, [])[0].startswith("The time you gave could not be mapped to blocks")
+    monkeypatch.setattr(W, "run_job", _fake_run_job)
+    r = web.post("/screen", data={"kind": "drain", "subject": VICTIM, "when": "6"}, follow_redirects=False)
+    assert r.status_code == 303
+    payload = json.loads(conn.execute("SELECT result_json FROM investigation_runs WHERE kind='drain_screen' ORDER BY created_at DESC LIMIT 1").fetchone()[0])["input"]
+    assert payload["hours_after"] == 6 and payload["incident_ts"] is not None
+    assert web.post("/screen", data={"kind": "drain", "subject": VICTIM, "when": "exact", "incident_local": "nope"}).text.count("could not be read") == 1
+    W.Worker(conn=conn, cfg={}).run_one()
+    page = web.get(r.headers["location"]).text
+    assert "In plain words" in page and "What caused the loss?" in page and "Did tokens leave this wallet" in page
+    assert "technical details" in page and "YES" in page
+    # hours_after=0 must clamp to 1, not vanish (a queued run would otherwise default to 24)
+    from service import cases as C
+    cid, _ = C.create(conn, "drain", 4663, VICTIM, hours_after=0)
+    assert json.loads(conn.execute("SELECT result_json FROM investigation_runs WHERE case_id=? ORDER BY created_at DESC LIMIT 1", (cid,)).fetchone()[0])["input"]["hours_after"] == 1

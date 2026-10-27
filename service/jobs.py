@@ -94,10 +94,10 @@ def rug_deep(client, token, tracked=()):
     return out
 
 
-def drain(client, victim, incident_ts=None):
+def drain(client, victim, incident_ts=None, hours_after=24):
     """Wallet-drain event screen (beta). Event-named predicates only; never a clean negative (see collectors.wallet)."""
     try:
-        out = drain_screen(client, victim, incident_ts=incident_ts)
+        out = drain_screen(client, victim, incident_ts=incident_ts, hours_after=hours_after)
     except PROVIDER_ERRORS as e:
         out = {"stage": "drain_screen", "victim": victim.lower(), "chain_id": client.chain_id, "complete": False,
                "gaps": [{"kind": "rpc_error", "detail": f"{type(e).__name__}: {str(e)[:160]}"}], "events": [], "predicates": {}}
@@ -144,7 +144,7 @@ def run_job(cfg, kind, payload, budget_s=None):
         elif kind == "money_trail":
             res = fn(client, payload["token"], wallets=payload.get("wallets") or ())
         else:
-            res = fn(client, payload["victim"], incident_ts=payload.get("incident_ts"))
+            res = fn(client, payload["victim"], incident_ts=payload.get("incident_ts"), hours_after=int(payload.get("hours_after") or 24))
         res["requests"] = getattr(client, "requests", None)
         return ("succeeded" if res.get("complete") else "partial"), res
     except (KeyError, ValueError, TypeError, SystemExit) as e:

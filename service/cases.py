@@ -27,7 +27,7 @@ def valid_addr(a):
     return bool(a and ADDR.match(a.strip()))
 
 
-def create(conn, kind, chain_id, subject, email=None, incident_ts=None, claimed_loss=None):
+def create(conn, kind, chain_id, subject, email=None, incident_ts=None, claimed_loss=None, hours_after=None):
     """Create a case and its free screen run. Returns (case_id, access_token). The token is shown once; only its hash is stored."""
     if kind not in ("rug", "drain"):
         raise ValueError("kind must be rug or drain")
@@ -48,6 +48,8 @@ def create(conn, kind, chain_id, subject, email=None, incident_ts=None, claimed_
                      " VALUES (?,?,?,?,?,?,?,?,?,?,?)", (cid, db.now(), kind, int(chain_id), subject, (email or None), "open", "free_screen", _hash(token), incident_ts, claimed_loss))
         db.audit(conn, "web", "case_created", cid, {"kind": kind, "subject": subject})
     payload = {"chain_id": int(chain_id), "token": subject} if kind == "rug" else {"chain_id": int(chain_id), "victim": subject, "incident_ts": incident_ts}
+    if kind == "drain" and hours_after is not None:
+        payload["hours_after"] = max(1, min(24, int(hours_after)))  # dropdown windows; the collector default is 24 h after an exact time
     queue.enqueue(conn, cid, "rug_screen" if kind == "rug" else "drain_screen", payload, JOB_VERSION)
     return cid, token
 

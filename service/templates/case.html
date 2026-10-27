@@ -13,16 +13,17 @@
 {% if working %}<span class="working">Working · refreshes every 15 s</span>{% endif %}</div>
 <div class="note info">This page is private: anyone with the full link can read it. Save the link; it is not recoverable. Nothing here is an accusation. Ownership of any address is unknown unless stated.</div>
 
+{% if plain_summary %}{% set ns.n = ns.n + 1 %}<div class="panel"><div class="panel-head"><span><span class="n">{{ '%02d'|format(ns.n) }} /</span>In plain words</span><span class="r">From the recorded answers only</span></div><div class="panel-body">{% for s in plain_summary %}<p style="margin:0 0 8px">{{ s }}</p>{% endfor %}</div></div>{% endif %}
 <div class="stats">
 <div class="stat"><div class="k">Findings</div><div class="val {{ 'acc' if assertions }}">{{ assertions|length }}</div><div class="s">{{ assertions|selectattr('verdict','equalto','YES')|list|length }} YES · {{ assertions|selectattr('verdict','equalto','no')|list|length }} no · {{ assertions|rejectattr('verdict','in',['YES','no'])|list|length }} unknown</div></div>
-<div class="stat"><div class="k">Checked through</div><div class="val mono">{{ (latest.get('checked_through') if latest else none) or '—' }}</div><div class="s">block · the stated cursor is the truth, not "now"</div></div>
-<div class="stat"><div class="k">Coverage</div><div class="val mono {{ 'acc' if latest and latest.get('complete') else 'warn' }}">{% if latest and 'complete' in latest %}{{ 'complete' if latest.get('complete') else 'INCOMPLETE' }}{% else %}—{% endif %}</div><div class="s">{{ (latest.get('gaps')|length if latest and latest.get('gaps') else 0) }} gap(s) listed below</div></div>
+<div class="stat"><div class="k">Checked through</div><div class="val mono">{{ (latest.get('checked_through') if latest else none) or '—' }}</div><div class="s">last block read · not "now"</div></div>
+<div class="stat"><div class="k">Coverage</div><div class="val mono {{ 'acc' if latest and latest.get('complete') else 'warn' }}">{% if latest and 'complete' in latest %}{{ 'complete' if latest.get('complete') else 'INCOMPLETE' }}{% else %}—{% endif %}</div><div class="s">{{ (latest.get('gaps')|length if latest and latest.get('gaps') else 0) }} limit(s) noted below</div></div>
 <div class="stat"><div class="k">Runs</div><div class="val mono">{{ runs|length }}</div><div class="s">{% if runs %}latest: {{ runs[0][0]['state'] }}{% else %}none yet{% endif %}</div></div>
 </div>
 
-{% set ns.n = ns.n + 1 %}<div class="panel"><div class="panel-head"><span><span class="n">{{ '%02d'|format(ns.n) }} /</span>Findings</span><span class="r">Three-valued · per question</span></div>
-{% if assertions %}<div class="tbl"><table><thead><tr><th>question</th><th>about</th><th>verdict</th><th>basis</th></tr></thead><tbody>
-{% for a in assertions %}<tr><td><b>{{ a['predicate'] }}</b>{% if a['object'] %}<div class="mut small m">{{ a['object'] }}</div>{% endif %}</td><td class="m">{{ a['subject']|short }}</td><td>{{ vword(a['verdict']) }}</td><td class="mut small">{{ a['reason'] }}<div class="m dim">{{ a['rule_version'] }}</div></td></tr>{% endfor %}
+{% set ns.n = ns.n + 1 %}<div class="panel"><div class="panel-head"><span><span class="n">{{ '%02d'|format(ns.n) }} /</span>Findings</span><span class="r">Yes · no · unknown, per question</span></div>
+{% if assertions %}<div class="tbl"><table><thead><tr><th>question</th><th>about</th><th>answer</th><th>what it means</th></tr></thead><tbody>
+{% for a in assertions %}<tr><td><b>{{ a['predicate']|question }}</b><div class="mut small m" title="{{ a['reason'] }}">{{ a['predicate'] }}{% if a['object'] %} · {{ a['object'] }}{% endif %} · {{ a['rule_version'] }}</div></td><td class="m">{{ a['subject']|short }}</td><td>{{ vword(a['verdict']) }}</td><td class="small">{{ a['predicate']|meaning(a['verdict'], a['reason']) }}</td></tr>{% endfor %}
 </tbody></table></div>
 {% else %}<div class="panel-body"><p class="mut">Findings appear when the run finishes.</p></div>{% endif %}</div>
 
@@ -65,11 +66,11 @@
 <p class="mut small">Only the assets the wallet was actually paid are followed, after its first paid sale, up to the amount received. "holding" means the wallet had sent nothing further on when read; "exit" means a configured bridge solver or exchange hot wallet, after which the chain cannot say who received it; "high volume", "fanout", "depth", "budget", "revisited" and "truncated" mean not followed, and any of them makes the trail's verdicts unknown. Who controls any endpoint is unknown unless stated.</p>
 {% endif %}
 {% if res and res.get('events') is defined and case['kind']=='drain' %}
-<p><b>{{ res['events']|length }} event(s)</b> in window{% if res.get('delegation') %} · EIP-7702 delegation now: {{ tri(res['delegation'].get('delegated')) }}{% if res['delegation'].get('delegate_target') %} → <span class="m">{{ res['delegation']['delegate_target'] }}</span> <span class="mut small">(observation only; the target is a contract, not a person)</span>{% endif %}{% endif %}</p>
+<p>{% if res['events'] %}<b>{{ res['events']|length }} event(s)</b> from this wallet in the window, listed below.{% elif res.get('window') %}No Transfer or Approval events from this wallet were recorded in the window checked (ERC-1155 and native-coin moves are not read).{% else %}Nothing was checked: the chain could not be read for this run.{% endif %}{% if res.get('delegation') %} Delegated to a contract at the block checked (EIP-7702): {{ tri(res['delegation'].get('delegated')) }}{% if res['delegation'].get('delegate_target') %} <span class="m small">{{ res['delegation']['delegate_target'] }}</span> <span class="mut small">(a contract, not a person)</span>{% endif %}{% endif %}</p>
 {% if res['events'] %}<div class="tbl"><table><thead><tr><th>block</th><th>event</th><th>asset</th><th>counterparty</th><th>tx</th></tr></thead><tbody>{% for e in res['events'][:100] %}<tr><td class="m">{{ e.get('block') }}</td><td>{{ e.get('event')|replace('_',' ') }}</td><td class="m">{{ (e.get('token') or e.get('contract') or e.get('address') or '')|short }}</td><td class="m">{{ (e.get('to') or e.get('spender') or e.get('operator') or '')|short }}</td><td class="m">{{ (e.get('tx') or '')|short }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}{% endif %}
 {% if res and res.get('dev_history') %}<p><b>Developer history:</b> {{ res['dev_history'].get('summary','') }}</p>{% endif %}
-{% if res and res.get('gaps') %}<details><summary>{{ res['gaps']|length }} gap(s) in coverage</summary><ul class="clean">{% for g in res['gaps'] %}<li class="m small warn">{{ g }}</li>{% endfor %}</ul></details>{% endif %}
-{% if res %}<details><summary>raw result (JSON)</summary><pre>{{ res|tojson(indent=1) }}</pre></details>{% endif %}
+{% if res and res.get('gaps') %}<p class="small" style="margin:12px 0 0"><b>What this could not see:</b></p><ul class="clean">{% for g in res['gaps'] %}{% set pg = g|plain_gap %}<li class="small" title="{{ pg[1] }}">{{ pg[0] }}</li>{% endfor %}</ul>{% endif %}
+{% if res %}<details><summary>technical details · raw result (JSON)</summary><pre>{{ res|tojson(indent=1) }}</pre></details>{% endif %}
 </div>{% else %}<div class="panel-body"><p class="mut">No runs yet.</p></div>{% endfor %}</div>
 
 {% if case['kind']=='rug' %}{% set ns.n = ns.n + 1 %}<div class="panel"><div class="panel-head"><span><span class="n">{{ '%02d'|format(ns.n) }} /</span>Founding case</span><span class="r">$29 · USDC on Base</span></div><div class="panel-body">

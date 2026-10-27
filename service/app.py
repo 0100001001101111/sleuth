@@ -19,7 +19,7 @@ from sleuth import config as C
 from sleuth import report as R
 from sleuth.collectors import COLLECTOR_VERSION
 
-from . import SERVICE_VERSION, cases, db, reports
+from . import SERVICE_VERSION, cases, db, plain, reports
 from .jobs import JOB_VERSION
 from .payments import PaymentError, manual, x402
 
@@ -36,6 +36,9 @@ def _local(ts, tz="America/Los_Angeles"):
 
 templates.env.filters["local"] = _local
 templates.env.filters["short"] = R.short
+templates.env.filters["question"] = plain.question
+templates.env.filters["meaning"] = plain.meaning
+templates.env.filters["plain_gap"] = plain.gap_text
 app = FastAPI(title="Sleuth incident service", version=SERVICE_VERSION, docs_url=None, redoc_url=None)
 basic = HTTPBasic()
 BASIC = Depends(basic)
@@ -150,12 +153,14 @@ def drain_form(request: Request):
 
 
 @app.post("/screen")
-def screen_create(request: Request, kind: str = Form(...), subject: str = Form(...), email: str = Form(""), incident_ts: str = Form(""), claimed_loss: str = Form("")):
+def screen_create(request: Request, kind: str = Form(...), subject: str = Form(...), email: str = Form(""), incident_ts: str = Form(""), claimed_loss: str = Form(""),
+                  when: str = Form(""), incident_local: str = Form("")):
     if not SCREEN_BRAKE.hit(client_ip(request)):
         return render("screen.html", request, kind=kind if kind in ("rug", "drain") else "rug", error="too many screens from this address in the last hour")
     try:
-        ts = float(incident_ts) if incident_ts.strip() else None
-        cid, tok = cases.create(conn(), kind, chain_id(), subject, email=email.strip()[:200] or None, incident_ts=ts, claimed_loss=claimed_loss.strip()[:100] or None)
+        ts, hours_after = plain.incident_time(incident_ts, when, incident_local, "America/Los_Angeles")
+        cid, tok = cases.create(conn(), kind, chain_id(), subject, email=email.strip()[:200] or None, incident_ts=ts, claimed_loss=claimed_loss.strip()[:100] or None,
+                                hours_after=hours_after)
     except (ValueError, db.DbError) as e:
         return render("screen.html", request, kind=kind if kind in ("rug", "drain") else "rug", error=str(e))
     return RedirectResponse(f"/c/{cid}?k={tok}", status_code=303)
@@ -186,8 +191,9 @@ def case_page(request: Request, case_id: str, k: str = ""):
     runs, asr, ev, subs, pays = _workspace(case_id)
     results = [(r, db.loads(r["result_json"])) for r in runs]
     entitled = any(p["state"] in ("settled", "entitled") for p in pays)
+    done = [res for r, res in results if r["kind"] in ("rug_screen", "drain_screen") and res]
     return render("case.html", request, case=case, k=k, runs=results, assertions=asr, evidence=ev, subs=subs, payments=pays, entitled=entitled,
-                  checkout_enabled=bool(manual.receive_address()))
+                  checkout_enabled=bool(manual.receive_address()), plain_summary=plain.summary(case, done[-1] if done else None, asr))
 
 
 @app.post("/c/{case_id}/checkout")

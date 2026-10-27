@@ -8,7 +8,8 @@
 <form method="post" action="/screen" class="panel"><div class="panel-head"><span><span class="n">01 /</span>Input</span><span class="r">Chain {{ chain_id }}</span></div>
 <div class="panel-body"><input type="hidden" name="kind" value="{{ kind }}">
 <label style="margin-top:0">{{ 'Token contract address' if kind=='rug' else 'Your wallet address' }}</label><input name="subject" class="m" required pattern="0x[0-9a-fA-F]{40}" placeholder="0x…" autocomplete="off" spellcheck="false">
-{% if kind=='drain' %}<label>When did it happen? <span class="hint">unix seconds, optional · we scan 1 h before to 24 h after</span></label><input name="incident_ts" inputmode="numeric" placeholder="e.g. 1761480000">
+{% if kind=='drain' %}<label>When did it happen? <span class="hint">pick one</span></label><select name="when"><option value="">I'm not sure · checks the most recent hour only</option><option value="6">In the last 6 hours</option><option value="24">In the last 24 hours</option><option value="exact">I know the time · enter it below</option></select>
+<label>Exact date and time, if you know it <span class="hint">optional · Pacific time · we check 1 h before to 24 h after</span></label><input name="incident_local" type="datetime-local">
 <label>Approximate loss <span class="hint">optional, free text</span></label><input name="claimed_loss" maxlength="100">{% endif %}
 <label>Email <span class="hint">optional · only for your private link and monitoring alerts</span></label><input name="email" type="email" autocomplete="email">
 <p style="margin:26px 0 0"><button class="btn primary" type="submit">Run free screen</button></p>
