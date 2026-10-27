@@ -3,10 +3,10 @@
 ## Test plan (offline, fixture-driven, like `tests/`)
 
 Baseline: **VERIFIED** `.venv/bin/python -m pytest -q tests` → 80 passed (53 CLI + 27 new) in ~0.4 s, all offline
-with fake clients. Lint: `.venv/bin/ruff check service sleuth/collectors tests/test_service.py tests/test_collectors.py`
+with fake clients. Lint: `.venv/bin/ruff check service sleuth/collectors tests/test_service.py tests/test_collectors.py tests/test_money.py`
 (the pre-existing test files have lint debt and are deliberately not passed to ruff).
 
-| Suite | IMPLEMENTED tests (`tests/test_collectors.py`, `tests/test_service.py`) | Still missing |
+| Suite | IMPLEMENTED tests (`tests/test_collectors.py`, `tests/test_money.py`, `tests/test_service.py`) | Still missing |
 |---|---|---|
 | collectors/logs | windowed scan keeps completed windows + exact missing span on budget expiry; capped window split, other failures → gap | 10k-log split, OR-topic list assertion |
 | collectors/receipts | — | everything (collector NOT BUILT) |

@@ -14,6 +14,10 @@
 
 ## Backlog with repo paths
 
+- **Triage venue rule needs quote-flow evidence** — `sleuth/flows.py::detect_pools` marks any contract with net token flow both ways as a pool; RAID's game contract (receives from the launcher, pays players) was therefore a "sell" venue and the screen said "launcher sold" where the money trail shows nothing was paid. Fix: a venue must have paid native/ERC-20 value to sellers (internal tx or token credit) in at least one sell tx; otherwise classify as sink. Changes a CLI verdict, so version `triage` and note it in the CLI docs.
+- **Money trail exit list is config-only** — `money-trail/0.2` counts a hop as an "exit" only when the recipient is in `known_services` (3 entries on chain 4663). Busy unlabeled EOAs are reported as `high volume`, never as exchanges, so `proceeds_reached_bridge_or_exchange` stays unknown for most real trails until a reviewed allowlist of bridge solvers / exchange hot wallets on Robinhood Chain exists (`config.yaml` → `known_services`).
+- **Money trail follow-ups** — follow ERC-20 quote assets into DEX positions and bridges past hop 1; add the dev fee recipient and the launch funding source (Relay solver → launcher) as trail roots; per-case cache of explorer pages so the paid deep pass reuses them.
+
 The collector boundary, service core, payments and website items are DONE as listed in the status table in 02; the
 remaining sequence:
 

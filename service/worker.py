@@ -48,8 +48,9 @@ class Worker:
             hb.join(timeout=10)  # the heartbeat connection must be idle before this thread writes the terminal state
         after = None
         if state in ("succeeded", "partial"):
-            def after(c):  # assertions commit with the run state or not at all
+            def after(c):  # assertions and free follow-up jobs commit with the run state or not at all
                 cases.record_result_tx(c, row["case_id"], row["id"], row["kind"], result)
+                cases.follow_up_tx(c, row["case_id"], row["kind"], result)
         try:
             ok = queue.finish(self.conn, row["id"], self.id, state, result={"input": payload, **result}, error=result.get("error"), after=after)
         except (db.DbError, KeyError, TypeError, AttributeError, ValueError) as e:  # a bad result shape must not strand the run as 'leased'

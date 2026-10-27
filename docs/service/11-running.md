@@ -6,7 +6,7 @@ Nothing here deploys to production, spends money, or sends anything externally.
 cd ~/sleuth
 python3 -m venv .venv && .venv/bin/pip install fastapi uvicorn jinja2 python-multipart curl_cffi pytest ruff httpx2
 .venv/bin/python -m pytest -q tests            # 80 offline tests (53 CLI + 27 service/collectors)
-.venv/bin/ruff check service sleuth/collectors tests/test_service.py tests/test_collectors.py   # only the new files
+.venv/bin/ruff check service sleuth/collectors tests/test_service.py tests/test_collectors.py tests/test_money.py   # only the new files
 export SLEUTH_ADMIN_PASSWORD='choose-one'        # enables /admin/payments (basic auth, user "admin"); unset = 401
 export SLEUTH_PAY_TO_BASE_USDC=0x...             # receive-only USDC address on Base; unset = checkout disabled (keep unset until B-2)
 # export SLEUTH_X402=1                           # enables POST /v1/screen/token with the MOCK facilitator only (keep off: 09 entry 2)

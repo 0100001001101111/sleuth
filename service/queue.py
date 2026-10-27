@@ -16,17 +16,23 @@ def input_hash(payload):
 
 def enqueue(conn, case_id, kind, payload, collector_version, requires_entitlement=False, budget_s=None):
     """Idempotent on (case, kind, input, version): re-enqueueing the same work returns the existing run id."""
-    h = input_hash(payload)
     with db.tx(conn):
-        row = conn.execute("SELECT id FROM investigation_runs WHERE case_id=? AND kind=? AND input_hash=? AND collector_version=?",
-                           (case_id, kind, h, collector_version)).fetchone()
-        if row:
-            return row["id"]
-        rid = db.new_id()
-        conn.execute("INSERT INTO investigation_runs (id, case_id, kind, state, input_hash, collector_version, requires_entitlement, budget_s, created_at, result_json)"
-                     " VALUES (?,?,?,?,?,?,?,?,?,?)",
-                     (rid, case_id, kind, "queued", h, collector_version, int(requires_entitlement), budget_s, db.now(), db.dumps({"input": payload})))
-        return rid
+        return enqueue_tx(conn, case_id, kind, payload, collector_version, requires_entitlement, budget_s)
+
+
+def enqueue_tx(conn, case_id, kind, payload, collector_version, requires_entitlement=False, budget_s=None):
+    """Same as enqueue but for a caller that already holds the write transaction (e.g. a follow-up job created in the
+    same transaction as its parent's terminal state, so a crash between the two cannot strand the child)."""
+    h = input_hash(payload)
+    row = conn.execute("SELECT id FROM investigation_runs WHERE case_id=? AND kind=? AND input_hash=? AND collector_version=?",
+                       (case_id, kind, h, collector_version)).fetchone()
+    if row:
+        return row["id"]
+    rid = db.new_id()
+    conn.execute("INSERT INTO investigation_runs (id, case_id, kind, state, input_hash, collector_version, requires_entitlement, budget_s, created_at, result_json)"
+                 " VALUES (?,?,?,?,?,?,?,?,?,?)",
+                 (rid, case_id, kind, "queued", h, collector_version, int(requires_entitlement), budget_s, db.now(), db.dumps({"input": payload})))
+    return rid
 
 
 def lease(conn, worker_id, lease_s=LEASE_S):

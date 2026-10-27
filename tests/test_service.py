@@ -299,6 +299,11 @@ def _fake_run_job(cfg, kind, payload, budget_s=None):
         return "succeeded", {"token": payload["token"], "complete": True, "checked_through": 123, "gaps": [],
                              "triage": {"dev_sold_in_window": True, "window_s": 1800, "summary": "fake", "tracked": [{"addr": OTHER, "roles": ["launcher"], "sold": "1", "bought": "0", "balance_now": None, "balance_fresh": False}],
                                         "launch": {"launcher": OTHER}}, "coordinated_launch": {"verdict": False, "reason": "fake"}}
+    if kind == "money_trail":
+        return "succeeded", {"token": payload["token"], "complete": True, "checked_through": 125, "gaps": [],
+                             "trail": {"wallets": [{"addr": w["addr"], "role": w["role"], "kind": "eoa", "label": "wallet", "disposals": [], "proceeds": {}, "hops": [], "endpoints": {}, "complete": True} for w in payload["wallets"]],
+                                       "verdict": {"sale_proceeds_received": False, "token_parked_in_non_venue_contract": False, "token_sent_to_bridge": False,
+                                                   "proceeds_left_wallet": None, "proceeds_reached_bridge_or_exchange": False}, "gaps": [], "complete": True}}
     if kind == "rug_deep":
         return "succeeded", {"token": payload["token"], "complete": True, "checked_through": 124, "gaps": [], "dev_history": {"dev": OTHER, "dev_ever_sold": True, "history_complete": True, "summary": "fake"},
                              "trace": {"verdict": {"direct_tx_connection": False, "shared_funding": None}}}
@@ -314,9 +319,11 @@ def test_web_end_to_end(web, conn, monkeypatch):
     k = q.split("=")[1]
     assert web.get(path + "?k=" + k).status_code == 200 and web.get(path + "?k=bad").status_code == 404
     w = W.Worker(conn=conn, cfg={})
-    assert w.run_one() and not w.run_one()
+    assert w.run_one() and w.run_one() and not w.run_one()  # screen, then the free money-trail follow-up it enqueued
+    assert [r[0] for r in conn.execute("SELECT kind FROM investigation_runs ORDER BY created_at").fetchall()] == ["rug_screen", "money_trail"]
     page = web.get(path + "?k=" + k).text
     assert "dev_sold_in_window" in page and "YES" in page and "Create order" in page
+    assert "Money trail" in page and "sale_proceeds_received" in page and "token_parked_in_non_venue_contract" in page
     assert web.post(path + "/checkout", data={"k": k}, follow_redirects=False).status_code == 303
     pid = conn.execute("SELECT id FROM payments").fetchone()[0]
     assert web.post(f"/admin/payments/{pid}/confirm", data={"tx_hash": "0x" + "ab" * 32}).status_code == 401
@@ -392,7 +399,7 @@ def test_assertions_commit_with_run_state(conn, monkeypatch):
     monkeypatch.setattr(W, "run_job", _fake_run_job)
     cid, _ = _case(conn)
     W.Worker(conn=conn, cfg={}).run_one()
-    run = conn.execute("SELECT state FROM investigation_runs WHERE case_id=?", (cid,)).fetchone()
+    run = conn.execute("SELECT state FROM investigation_runs WHERE case_id=? AND kind='rug_screen'", (cid,)).fetchone()
     assert run["state"] == "succeeded" and conn.execute("SELECT COUNT(*) FROM assertions WHERE case_id=?", (cid,)).fetchone()[0] >= 2
     # a result the recorder cannot parse does not strand the run as 'leased'
     monkeypatch.setattr(W, "run_job", lambda *a, **k: ("succeeded", {"token": TOKEN, "triage": "not-a-dict"}))

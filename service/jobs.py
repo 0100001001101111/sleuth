@@ -7,6 +7,7 @@ from sleuth import devhistory, trace, triage
 from sleuth.client import ApiError, BudgetExceeded, Client
 from sleuth.collectors import COLLECTOR_VERSION
 from sleuth.collectors.launchcall import launch_calldata
+from sleuth.collectors.money import money_trail as _money_trail
 from sleuth.collectors.ring import coordinated_launch
 from sleuth.collectors.wallet import drain_screen
 from sleuth.onchain import RpcError, transfer_logs
@@ -14,6 +15,8 @@ from sleuth.onchain import RpcError, transfer_logs
 JOB_VERSION = f"jobs/0.1.0+{COLLECTOR_VERSION}"
 SCREEN_BUDGET_S = 20.0
 DEEP_BUDGET_S = 240.0
+MONEY_BUDGET_S = 150.0   # explorer pages cost ~2-3 s each; 5 wallets x 6 pages plus hops
+MONEY_MAX_WALLETS = 5
 PROVIDER_ERRORS = (BudgetExceeded, ApiError, RpcError, OSError, ValueError, TypeError, KeyError)
 
 
@@ -103,7 +106,28 @@ def drain(client, victim, incident_ts=None):
     return out
 
 
-JOBS = {"rug_screen": (rug_screen, SCREEN_BUDGET_S), "rug_deep": (rug_deep, DEEP_BUDGET_S), "drain_screen": (drain, SCREEN_BUDGET_S)}
+def money_trail(client, token, wallets=()):
+    """Free follow-up to the screen: follow sale proceeds from the launcher and top sellers hop by hop (see
+    sleuth.collectors.money). High-volume wallets (bots, hot wallets) are listed but not followed."""
+    out = {"job": "money_trail", "job_version": JOB_VERSION, "token": token.lower(), "chain_id": client.chain_id,
+           "head": _head(client), "gaps": [], "complete": False, "checked_through": None}
+    ws = [(w["addr"], w.get("role") or "tracked") for w in wallets if isinstance(w, dict) and w.get("addr")][:MONEY_MAX_WALLETS]
+    if not ws:
+        out["gaps"].append("no wallets to follow (screen found no launcher or sellers)")
+        return out
+    try:
+        out["trail"] = _money_trail(client, token, ws)
+    except PROVIDER_ERRORS as e:
+        out["gaps"].append(f"money trail failed: {type(e).__name__}: {str(e)[:160]}")
+        return out
+    out["gaps"] = [f"{g.get('kind')}: {g.get('detail')}" for g in out["trail"].get("gaps") or []]
+    out["complete"] = bool(out["trail"].get("complete"))
+    out["checked_through"] = (out["head"] or {}).get("block") if out["complete"] else None
+    return out
+
+
+JOBS = {"rug_screen": (rug_screen, SCREEN_BUDGET_S), "rug_deep": (rug_deep, DEEP_BUDGET_S), "drain_screen": (drain, SCREEN_BUDGET_S),
+        "money_trail": (money_trail, MONEY_BUDGET_S)}
 
 
 def run_job(cfg, kind, payload, budget_s=None):
@@ -117,6 +141,8 @@ def run_job(cfg, kind, payload, budget_s=None):
             res = fn(client, payload["token"], window_s=int(payload.get("window_s", 1800)))
         elif kind == "rug_deep":
             res = fn(client, payload["token"], tracked=payload.get("tracked") or ())
+        elif kind == "money_trail":
+            res = fn(client, payload["token"], wallets=payload.get("wallets") or ())
         else:
             res = fn(client, payload["victim"], incident_ts=payload.get("incident_ts"))
         res["requests"] = getattr(client, "requests", None)

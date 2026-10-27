@@ -26,7 +26,15 @@ from .payments import PaymentError, manual, x402
 log = logging.getLogger("sleuth.service.app")
 HERE = Path(__file__).parent
 templates = Jinja2Templates(directory=str(HERE / "templates"))
-templates.env.filters["local"] = lambda ts, tz="America/Los_Angeles": R.local(ts, tz) if ts else "—"
+def _local(ts, tz="America/Los_Angeles"):
+    """Explorer timestamps are trusted data, not trusted shapes: a malformed one renders as-is instead of a 500."""
+    try:
+        return R.local(ts, tz) if ts else "—"
+    except (ValueError, TypeError, OverflowError):
+        return str(ts)
+
+
+templates.env.filters["local"] = _local
 templates.env.filters["short"] = R.short
 app = FastAPI(title="Sleuth incident service", version=SERVICE_VERSION, docs_url=None, redoc_url=None)
 basic = HTTPBasic()

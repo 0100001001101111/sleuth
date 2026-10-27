@@ -4,63 +4,93 @@
 {% block body %}
 {% macro vword(w) %}<span class="v {{ 'YES' if w=='YES' else ('no' if w=='no' else 'unk') }}">{{ w }}</span>{% endmacro %}
 {% macro tri(v) %}{{ vword('YES' if v else ('no' if v is sameas false else 'unknown (incomplete)')) }}{% endmacro %}
+{% set latest = runs[0][1] if runs else none %}
+{% set ns = namespace(n=0) %}
 
-<div class="eyebrow">{{ 'Rug screen' if case['kind']=='rug' else 'Wallet drain screen · beta' }} · case {{ case['id'][:8] }}</div>
-<h1 class="m" style="font-size:clamp(18px,2.6vw,26px);letter-spacing:0">{{ case['subject'] }}</h1>
+<div class="label">{{ 'Rug screen' if case['kind']=='rug' else 'Wallet drain screen · beta' }} · case {{ case['id'][:8] }}</div>
+<h1 class="sub">{{ case['subject'] }}</h1>
 <div class="meta"><span><b>{{ 'Token' if case['kind']=='rug' else 'Wallet' }}</b> on chain {{ case['chain_id'] }}</span><span><b>Opened</b> {{ case['created_at']|local }}</span><span><b>Product</b> {{ case['product']|replace('_',' ') }}</span>
-{% if working %}<span class="working">Working… this page refreshes itself every 15 s</span>{% endif %}</div>
+{% if working %}<span class="working">Working · refreshes every 15 s</span>{% endif %}</div>
 <div class="note info">This page is private: anyone with the full link can read it. Save the link; it is not recoverable. Nothing here is an accusation. Ownership of any address is unknown unless stated.</div>
 
-<section class="sec"><h2>Findings</h2>
-{% if assertions %}<div class="tbl"><table><thead><tr><th>question</th><th>about</th><th>verdict</th><th>basis</th></tr></thead><tbody>
-{% for a in assertions %}<tr><td><b>{{ a['predicate'] }}</b>{% if a['object'] %}<div class="mut small">{{ a['object'] }}</div>{% endif %}</td><td class="m">{{ a['subject']|short }}</td><td>{{ vword(a['verdict']) }}</td><td class="mut small">{{ a['reason'] }}<div class="m">{{ a['rule_version'] }}</div></td></tr>{% endfor %}
-</tbody></table></div>
-{% else %}<div class="card"><p class="mut">Findings appear when the run finishes.</p></div>{% endif %}</section>
+<div class="stats">
+<div class="stat"><div class="k">Findings</div><div class="val {{ 'acc' if assertions }}">{{ assertions|length }}</div><div class="s">{{ assertions|selectattr('verdict','equalto','YES')|list|length }} YES · {{ assertions|selectattr('verdict','equalto','no')|list|length }} no · {{ assertions|rejectattr('verdict','in',['YES','no'])|list|length }} unknown</div></div>
+<div class="stat"><div class="k">Checked through</div><div class="val mono">{{ (latest.get('checked_through') if latest else none) or '—' }}</div><div class="s">block · the stated cursor is the truth, not "now"</div></div>
+<div class="stat"><div class="k">Coverage</div><div class="val mono {{ 'acc' if latest and latest.get('complete') else 'warn' }}">{% if latest and 'complete' in latest %}{{ 'complete' if latest.get('complete') else 'INCOMPLETE' }}{% else %}—{% endif %}</div><div class="s">{{ (latest.get('gaps')|length if latest and latest.get('gaps') else 0) }} gap(s) listed below</div></div>
+<div class="stat"><div class="k">Runs</div><div class="val mono">{{ runs|length }}</div><div class="s">{% if runs %}latest: {{ runs[0][0]['state'] }}{% else %}none yet{% endif %}</div></div>
+</div>
 
-<section class="sec"><h2>Runs</h2>
-{% for r, res in runs %}<div class="card">
-<div class="meta" style="margin:0 0 8px"><b>{{ r['kind']|replace('_',' ') }}</b>
-<span class="tag {{ 'ok' if r['state']=='succeeded' else ('warn' if r['state']=='partial' else ('bad' if r['state'] in ('failed_terminal',) else 'neutral')) }}">{{ r['state'] }}</span>
+{% set ns.n = ns.n + 1 %}<div class="panel"><div class="panel-head"><span><span class="n">{{ '%02d'|format(ns.n) }} /</span>Findings</span><span class="r">Three-valued · per question</span></div>
+{% if assertions %}<div class="tbl"><table><thead><tr><th>question</th><th>about</th><th>verdict</th><th>basis</th></tr></thead><tbody>
+{% for a in assertions %}<tr><td><b>{{ a['predicate'] }}</b>{% if a['object'] %}<div class="mut small m">{{ a['object'] }}</div>{% endif %}</td><td class="m">{{ a['subject']|short }}</td><td>{{ vword(a['verdict']) }}</td><td class="mut small">{{ a['reason'] }}<div class="m dim">{{ a['rule_version'] }}</div></td></tr>{% endfor %}
+</tbody></table></div>
+{% else %}<div class="panel-body"><p class="mut">Findings appear when the run finishes.</p></div>{% endif %}</div>
+
+{% set ns.n = ns.n + 1 %}<div class="panel"><div class="panel-head"><span><span class="n">{{ '%02d'|format(ns.n) }} /</span>Runs</span><span class="r">{{ runs|length }} recorded</span></div>
+{% for r, res in runs %}<div class="run">
+<div class="meta" style="margin:0 0 10px"><b style="color:var(--ink)">{{ r['kind']|replace('_',' ') }}</b>
+<span class="tag {{ 'ok' if r['state']=='succeeded' else ('warn' if r['state']=='partial' else ('bad' if r['state']=='failed_terminal' else '')) }}">{{ r['state'] }}</span>
 <span>attempt {{ r['attempts'] }}</span><span>started {{ r['started_at']|local }}</span><span>finished {{ r['finished_at']|local }}</span></div>
-{% if r['state'] in ('queued','leased') %}<p class="working">Working…{% if r['requires_entitlement'] %} starts after payment settles{% endif %}</p>{% endif %}
-{% if res and 'complete' in res %}<p class="small">Checked through block <b>{{ res.get('checked_through') or 'unknown' }}</b> · <span class="{{ 'ok' if res.get('complete') else 'warn' }}">{{ 'complete' if res.get('complete') else 'INCOMPLETE' }}</span></p>{% endif %}
+{% if r['state'] in ('queued','leased') %}<p class="working">Working{% if r['requires_entitlement'] %} · starts after payment settles{% endif %}</p>{% endif %}
+{% if res and 'complete' in res %}<p class="small m">Checked through block <b>{{ res.get('checked_through') or 'unknown' }}</b> · <span class="{{ 'ok' if res.get('complete') else 'warn' }}">{{ 'complete' if res.get('complete') else 'INCOMPLETE' }}</span></p>{% endif %}
 {% if res and res.get('error') %}<div class="note bad">{{ res['error'] }}</div>{% endif %}
 {% if res and res.get('triage') %}{% set t = res['triage'] %}<p>{{ t.get('summary','') }}</p>
-{% if t.get('launch') %}<div class="meta" style="margin:0 0 10px"><span><b>Launcher</b> <span class="m">{{ t['launch'].get('launcher') or 'unknown' }}</span></span><span><b>Launchpad</b> {{ t['launch'].get('launchpad') or '?' }}</span><span><b>Creation block</b> {{ t['launch'].get('creation_block') or '?' }}</span></div>{% endif %}
+{% if t.get('launch') %}<div class="meta" style="margin:0 0 10px"><span><b>Launcher</b> {{ t['launch'].get('launcher') or 'unknown' }}</span><span><b>Launchpad</b> {{ t['launch'].get('launchpad') or '?' }}</span><span><b>Creation block</b> {{ t['launch'].get('creation_block') or '?' }}</span></div>{% endif %}
 {% if t.get('tracked') %}<div class="tbl"><table><thead><tr><th>address</th><th>roles</th><th>sold</th><th>bought</th><th>balance now</th></tr></thead><tbody>{% for w in t['tracked'] %}<tr><td class="m">{{ w['addr'] }}</td><td>{{ w['roles']|join(', ') }}</td><td>{{ w['sold'] }}</td><td>{{ w['bought'] }}</td><td>{{ w['balance_now'] if w['balance_fresh'] else 'unknown' }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}{% endif %}
 {% if res and res.get('launch_calldata') and res['launch_calldata'].get('decoded') %}{% set d = res['launch_calldata']['decoded'] %}
 <p><b>Launch call decoded:</b> {{ d['name'] }} ({{ d['symbol'] }}) · creator tax {{ d['creator_tax_bps'] }} bps · fee recipient <span class="m">{{ d['creator_fee_recipient'] }}</span> · snipe-tax exemptions: {{ d['snipe_tax_exemptions']|length }}</p>
 {% if d['snipe_tax_exemptions'] %}<details><summary>exempt addresses</summary><ul class="clean">{% for a in d['snipe_tax_exemptions'] %}<li class="m">{{ a }}</li>{% endfor %}</ul></details>{% endif %}{% endif %}
 {% if res and res.get('coordinated_launch') %}{% set c = res['coordinated_launch'] %}
-<p><b>Early-buy concentration test</b> (first {{ c.get('thresholds',{}).get('blocks','?') }} blocks): {{ tri(c.get('verdict')) }}{% if c.get('verdict') %} <span class="mut small">over threshold</span>{% endif %}<br>
-<span class="small">early buyers {{ c.get('early_buyers','?') }} · early share {{ '%.1f'|format(100*(c.get('early_share') or 0)) }}% · exempt buyers {{ c.get('exempt_buyers','?') }}</span><br><span class="mut small">{{ c.get('reason') or '' }}</span></p>{% endif %}
+<p><b>Early-buy concentration test</b> <span class="mut small">(first {{ c.get('thresholds',{}).get('blocks','?') }} blocks)</span> {{ tri(c.get('verdict')) }}<br>
+<span class="small m mut">early buyers {{ c.get('early_buyers','?') }} · early share {{ '%.1f'|format(100*(c.get('early_share') or 0)) }}% · exempt buyers {{ c.get('exempt_buyers','?') }}</span>{% if c.get('reason') %}<br><span class="mut small">{{ c['reason'] }}</span>{% endif %}</p>{% endif %}
+{% if res and res.get('trail') %}{% set tr = res['trail'] %}{% set tv = tr.get('verdict') or {} %}
+{% macro amt(raw, dec, sym) %}{% if dec is none %}{{ raw }} raw {{ sym }}{% else %}{{ '%.6f'|format((raw|int) / (10 ** (dec|int))) }} {{ sym }}{% endif %}{% endmacro %}
+{% set unres = ['unresolved','budget','depth','fanout','high_volume','revisited','truncated'] %}
+<p><b>Money trail</b> <span class="mut small">launcher + top sellers · {{ (tr.get('wallets') or [])|length }} wallet(s) · depth {{ 2 }}{% if (res.get('input') or {}).get('omitted') %} · {{ res['input']['omitted']|length }} candidate wallet(s) beyond the cap not followed{% endif %}</span></p>
+<div class="meta" style="margin:0 0 12px"><span>sale proceeds received {{ tri(tv.get('sale_proceeds_received')) }}</span><span>token parked in non-venue contract {{ tri(tv.get('token_parked_in_non_venue_contract')) }}</span><span>token sent to bridge / exchange {{ tri(tv.get('token_sent_to_bridge')) }}</span><span>proceeds left wallet {{ tri(tv.get('proceeds_left_wallet')) }}</span><span>reached bridge / exchange {{ tri(tv.get('proceeds_reached_bridge_or_exchange')) }}</span></div>
+{% for w in tr.get('wallets') or [] %}
+<p class="small m" style="margin:14px 0 4px"><b>{{ (w.get('role') or '?')|replace('_',' ') }}</b> {{ w.get('addr') }} <span class="mut">· {{ w.get('label') }}{% if w.get('skipped') %} · {{ w['skipped'] }}{% endif %}{% if not w.get('complete') %} · <span class="warn">INCOMPLETE</span>{% endif %}</span>
+{% if w.get('proceeds') %}<br><span class="ok">received for sales:</span> {% for a, v in w['proceeds'].items() %}{{ amt(v.get('raw', 0), v.get('decimals'), v.get('symbol', '?')) }}{% if not loop.last %} · {% endif %}{% endfor %}{% endif %}
+{% if w.get('not_attributed') %}<br><span class="mut">{{ w['not_attributed'] }} later outflow(s) beyond the proceeds total, not attributed to the sale</span>{% endif %}</p>
+{% if w.get('disposals') %}<div class="tbl"><table><thead><tr><th>time</th><th>token out</th><th>to</th><th>what it was</th><th>paid back</th></tr></thead><tbody>
+{% for d in w['disposals'][:40] %}<tr><td class="m small">{{ d.get('ts')|local }}</td><td class="m">{{ amt(d.get('raw', 0), d.get('decimals'), '') }}</td><td class="m small">{{ (d.get('to') or '')|short }} <span class="mut">{{ d.get('to_label') }}</span></td>
+<td>{% set c = d.get('classification') %}{% if c=='sale' %}<span class="tag ok">sale</span>{% elif c=='sent_to_bridge' %}<span class="tag warn">sent to bridge / exchange</span>{% elif c=='transfer_to_contract' %}<span class="tag">transfer to contract · nothing paid</span>{% elif c=='transfer_to_service' %}<span class="tag">transfer to pool / router · nothing paid</span>{% elif c=='unverified' %}<span class="tag warn">payment unverified · pages incomplete</span>{% else %}<span class="tag">transfer</span>{% endif %}</td>
+<td class="m small">{% for pch in d.get('paid') or [] %}{{ amt(pch.get('raw', 0), pch.get('decimals'), pch.get('symbol', '?')) }}{% if not loop.last %}, {% endif %}{% else %}—{% endfor %}</td></tr>{% endfor %}
+{% if w['disposals']|length > 40 %}<tr><td colspan="5" class="mut small">{{ w['disposals']|length - 40 }} more in the JSON export</td></tr>{% endif %}</tbody></table></div>{% endif %}
+{% if w.get('hops') %}<div class="tbl"><table><thead><tr><th>hop</th><th>time</th><th>attributed</th><th>to</th><th>ended</th></tr></thead><tbody>
+{% for h in w['hops'] recursive %}<tr><td class="m">{{ h.get('depth') }}{% if (h.get('depth') or 1) > 1 %} ↳{% endif %}</td><td class="m small">{{ h.get('ts')|local }}</td><td class="m">{{ amt(h.get('attributed', h.get('raw', 0)), h.get('decimals'), h.get('symbol', '?')) }}</td><td class="m small">{{ (h.get('to') or '')|short }} <span class="mut">{{ h.get('to_label') }}</span></td><td><span class="tag {{ 'bad' if h.get('stop')=='exit' else ('warn' if h.get('stop') in unres else '') }}">{{ (h.get('stop') or '?')|replace('_',' ') }}</span></td></tr>
+{{ loop(h.get('children') or []) }}{% endfor %}</tbody></table></div>{% endif %}
+{% if w.get('endpoints') %}<p class="small mut">where it ended: {% for stop, assets in w['endpoints'].items() %}<b>{{ stop|replace('_',' ') }}</b> {% for a, v in assets.items() %}{% if v is mapping %}{{ amt(v.get('raw', 0), v.get('decimals'), v.get('symbol', '?')) }}{% else %}{{ v }} {{ a }}{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}{% if not loop.last %} · {% endif %}{% endfor %}</p>{% endif %}
+{% endfor %}
+<p class="mut small">Only the assets the wallet was actually paid are followed, after its first paid sale, up to the amount received. "holding" means the wallet had sent nothing further on when read; "exit" means a configured bridge solver or exchange hot wallet, after which the chain cannot say who received it; "high volume", "fanout", "depth", "budget", "revisited" and "truncated" mean not followed, and any of them makes the trail's verdicts unknown. Who controls any endpoint is unknown unless stated.</p>
+{% endif %}
 {% if res and res.get('events') is defined and case['kind']=='drain' %}
 <p><b>{{ res['events']|length }} event(s)</b> in window{% if res.get('delegation') %} · EIP-7702 delegation now: {{ tri(res['delegation'].get('delegated')) }}{% if res['delegation'].get('delegate_target') %} → <span class="m">{{ res['delegation']['delegate_target'] }}</span> <span class="mut small">(observation only; the target is a contract, not a person)</span>{% endif %}{% endif %}</p>
-{% if res['events'] %}<div class="tbl"><table><thead><tr><th>block</th><th>event</th><th>asset</th><th>counterparty</th><th>tx</th></tr></thead><tbody>{% for e in res['events'][:100] %}<tr><td>{{ e.get('block') }}</td><td>{{ e.get('event')|replace('_',' ') }}</td><td class="m">{{ (e.get('token') or e.get('contract') or e.get('address') or '')|short }}</td><td class="m">{{ (e.get('to') or e.get('spender') or e.get('operator') or '')|short }}</td><td class="m">{{ (e.get('tx') or '')|short }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}{% endif %}
+{% if res['events'] %}<div class="tbl"><table><thead><tr><th>block</th><th>event</th><th>asset</th><th>counterparty</th><th>tx</th></tr></thead><tbody>{% for e in res['events'][:100] %}<tr><td class="m">{{ e.get('block') }}</td><td>{{ e.get('event')|replace('_',' ') }}</td><td class="m">{{ (e.get('token') or e.get('contract') or e.get('address') or '')|short }}</td><td class="m">{{ (e.get('to') or e.get('spender') or e.get('operator') or '')|short }}</td><td class="m">{{ (e.get('tx') or '')|short }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}{% endif %}
 {% if res and res.get('dev_history') %}<p><b>Developer history:</b> {{ res['dev_history'].get('summary','') }}</p>{% endif %}
-{% if res and res.get('gaps') %}<details><summary>{{ res['gaps']|length }} gap(s) in coverage</summary><ul class="clean">{% for g in res['gaps'] %}<li class="m small">{{ g }}</li>{% endfor %}</ul></details>{% endif %}
+{% if res and res.get('gaps') %}<details><summary>{{ res['gaps']|length }} gap(s) in coverage</summary><ul class="clean">{% for g in res['gaps'] %}<li class="m small warn">{{ g }}</li>{% endfor %}</ul></details>{% endif %}
 {% if res %}<details><summary>raw result (JSON)</summary><pre>{{ res|tojson(indent=1) }}</pre></details>{% endif %}
-</div>{% else %}<div class="card"><p class="mut">No runs yet.</p></div>{% endfor %}</section>
+</div>{% else %}<div class="panel-body"><p class="mut">No runs yet.</p></div>{% endfor %}</div>
 
-{% if case['kind']=='rug' %}<section class="sec"><h2>Founding case</h2>
-{% if entitled %}<div class="note ok"><b>Entitled.</b> The deep pass is queued or complete above; monitoring is below.</div>
-{% elif payments %}{% set p = payments[0] %}<div class="card"><div class="meta" style="margin:0 0 8px"><b>Order {{ p['state'] }}</b><span>reference {{ p['id'][:8] }}</span></div>
-<p>Send exactly <b>{{ p['amount'] }} {{ p['asset'] }}</b> on <b>{{ p['network'] }}</b> to</p><p class="m" style="font-size:15px">{{ p['pay_to'] }}</p>
-<p class="mut small">From any wallet you like (not the affected one). Settlement is confirmed by the operator against the Base explorer; this page updates when it settles.</p></div>
-{% elif checkout_enabled %}<div class="card"><div class="meta" style="margin:0 0 8px"><b>$29 in USDC on Base</b><span>one case · no subscription</span></div>
-<p>Deep deterministic pass (dev history across prior launches, wallet trace for shared funding and coordinated trading), evidence package, 30 days of finalized-block monitoring. No human investigator, no support, no report filing, no recovery. <a href="/methodology">Methodology</a>.</p>
-<form method="post" action="/c/{{ case['id'] }}/checkout"><input type="hidden" name="k" value="{{ k }}"><button class="btn" type="submit">Create order</button></form></div>
-{% else %}<div class="card"><p class="mut">Checkout is not enabled on this instance.</p></div>{% endif %}</section>{% endif %}
+{% if case['kind']=='rug' %}{% set ns.n = ns.n + 1 %}<div class="panel"><div class="panel-head"><span><span class="n">{{ '%02d'|format(ns.n) }} /</span>Founding case</span><span class="r">$29 · USDC on Base</span></div><div class="panel-body">
+{% if entitled %}<div class="note ok" style="margin:0"><b>Entitled.</b> The deep pass is queued or complete above; monitoring is below.</div>
+{% elif payments %}{% set p = payments[0] %}<div class="meta" style="margin:0 0 10px"><b style="color:var(--ink)">Order {{ p['state'] }}</b><span>reference {{ p['id'][:8] }}</span></div>
+<p>Send exactly <b>{{ p['amount'] }} {{ p['asset'] }}</b> on <b>{{ p['network'] }}</b> to</p><p class="m" style="font-size:14px;color:var(--ink)">{{ p['pay_to'] }}</p>
+<p class="mut small">From any wallet you like (not the affected one). Settlement is confirmed by the operator against the Base explorer; this page updates when it settles.</p>
+{% elif checkout_enabled %}<p>Deep deterministic pass (dev history across prior launches, wallet trace for shared funding and coordinated trading), evidence package, 30 days of finalized-block monitoring. No human investigator, no support, no report filing, no recovery. <a href="/methodology">Methodology</a>.</p>
+<form method="post" action="/c/{{ case['id'] }}/checkout" style="margin-top:20px"><input type="hidden" name="k" value="{{ k }}"><button class="btn primary" type="submit">Create order</button></form>
+{% else %}<p class="mut" style="margin:0">Checkout is not enabled on this instance.</p>{% endif %}</div></div>{% endif %}
 
-{% if subs %}<section class="sec"><h2>Monitoring</h2><div class="tbl"><table><thead><tr><th>state</th><th>until</th><th>evidence cursor (finalized)</th><th>provisional cursor</th><th>last success</th><th>last error</th></tr></thead><tbody>
-{% for s in subs %}<tr><td><span class="tag {{ 'ok' if s['state']=='active' else ('warn' if s['state']=='degraded' else 'neutral') }}">{{ s['state'] }}</span></td><td class="small">{{ s['ends_at']|local }}</td><td class="m">{{ s['finalized_cursor'] }} <span class="mut">{{ (s['finalized_hash'] or '')[:12] }}</span></td><td class="m">{{ s['provisional_cursor'] }} <span class="mut">{{ (s['provisional_hash'] or '')[:12] }}</span></td><td class="small">{{ s['last_success_at']|local }}</td><td class="warn small">{{ s['last_error'] or '' }}</td></tr>{% endfor %}
+{% if subs %}{% set ns.n = ns.n + 1 %}<div class="panel"><div class="panel-head"><span><span class="n">{{ '%02d'|format(ns.n) }} /</span>Monitoring</span><span class="r">Finalized blocks only</span></div><div class="tbl"><table><thead><tr><th>state</th><th>until</th><th>evidence cursor (finalized)</th><th>provisional cursor</th><th>last success</th><th>last error</th></tr></thead><tbody>
+{% for s in subs %}<tr><td><span class="tag {{ 'ok' if s['state']=='active' else ('warn' if s['state']=='degraded' else '') }}">{{ s['state'] }}</span></td><td class="small m">{{ s['ends_at']|local }}</td><td class="m">{{ s['finalized_cursor'] }} <span class="dim">{{ (s['finalized_hash'] or '')[:12] }}</span></td><td class="m">{{ s['provisional_cursor'] }} <span class="dim">{{ (s['provisional_hash'] or '')[:12] }}</span></td><td class="small m">{{ s['last_success_at']|local }}</td><td class="warn small">{{ s['last_error'] or '' }}</td></tr>{% endfor %}
 </tbody></table></div>
-<p class="mut small">Alerts are written for finalized blocks only. "degraded" means the provider failed repeatedly and cursors are behind; the stated cursor is the truth, not "now".</p></section>{% endif %}
+<div class="panel-body" style="border-top:1px solid var(--line)"><p class="mut small" style="margin:0">"degraded" means the provider failed repeatedly and cursors are behind; the stated cursor is the truth, not "now".</p></div></div>{% endif %}
 
-{% if evidence %}<section class="sec"><h2>Monitored evidence</h2><div class="tbl"><table><thead><tr><th>block</th><th>finality</th><th>key</th><th>observed</th></tr></thead><tbody>
-{% for e in evidence %}<tr><td>{{ e['block'] }}</td><td><span class="tag {{ 'ok' if e['finality']=='finalized' else 'neutral' }}">{{ e['finality'] }}</span></td><td class="m small">{{ e['key'] }}</td><td class="small">{{ e['observed_at']|local }}</td></tr>{% endfor %}
-</tbody></table></div></section>{% endif %}
+{% if evidence %}{% set ns.n = ns.n + 1 %}<div class="panel"><div class="panel-head"><span><span class="n">{{ '%02d'|format(ns.n) }} /</span>Monitored evidence</span><span class="r">{{ evidence|length }} item(s)</span></div><div class="tbl"><table><thead><tr><th>block</th><th>finality</th><th>key</th><th>observed</th></tr></thead><tbody>
+{% for e in evidence %}<tr><td class="m">{{ e['block'] }}</td><td><span class="tag {{ 'ok' if e['finality']=='finalized' else '' }}">{{ e['finality'] }}</span></td><td class="m small">{{ e['key'] }}</td><td class="small m">{{ e['observed_at']|local }}</td></tr>{% endfor %}
+</tbody></table></div></div>{% endif %}
 
-<section class="sec"><h2>Export</h2><p><a class="btn" href="/c/{{ case['id'] }}/export.json?k={{ k }}">Evidence package (JSON)</a> &nbsp;<a class="btn ghost" href="/c/{{ case['id'] }}/export.html?k={{ k }}">Printable (HTML)</a></p>
-<p class="mut small">The JSON manifest hash is recomputable: canonical JSON with the hash field blank.</p></section>
+{% set ns.n = ns.n + 1 %}<div class="panel"><div class="panel-head"><span><span class="n">{{ '%02d'|format(ns.n) }} /</span>Export</span><span class="r">Reproducible</span></div><div class="panel-body">
+<p style="margin:0"><a class="btn" href="/c/{{ case['id'] }}/export.json?k={{ k }}">Evidence package · JSON</a> &nbsp; <a class="btn ghost" href="/c/{{ case['id'] }}/export.html?k={{ k }}">Printable · HTML</a></p>
+<p class="mut small" style="margin:14px 0 0">The JSON manifest hash is recomputable: canonical JSON with the hash field blank.</p></div></div>
 {% endblock %}

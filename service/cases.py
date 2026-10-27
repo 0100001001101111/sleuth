@@ -5,10 +5,11 @@ import hmac
 import re
 import secrets
 
+from sleuth.collectors.money import RULE_VERSION as MONEY_RULE
 from sleuth.collectors.ring import RULE_VERSION as RING_RULE
 
 from . import db, queue
-from .jobs import JOB_VERSION
+from .jobs import JOB_VERSION, MONEY_MAX_WALLETS
 
 ADDR = re.compile(r"^0x[0-9a-fA-F]{40}$")
 MONITOR_DAYS = 30
@@ -96,6 +97,34 @@ def _put(conn, case_id, run_id, subject, predicate, obj, verdict, reason, rule):
                  (db.new_id(), case_id, run_id, subject, predicate, obj, word, (reason or "")[:300], rule, db.now()))
 
 
+def follow_up_tx(conn, case_id, kind, result):
+    """Enqueue the free money trail once a rug screen has named wallets to follow. Runs INSIDE the parent run's
+    finish transaction (queue.finish's `after`), so the child exists iff the parent's terminal state committed.
+    Idempotent (the queue hashes the input). Priority within the cap: launcher, top sellers, then other tracked
+    wallets with their triage role; omitted candidates are listed in the payload for the case page."""
+    if kind != "rug_screen":
+        return None
+    tri = result.get("triage") or {}
+    launcher = (tri.get("launch") or {}).get("launcher")
+    cands = ([(launcher, "launcher")] if launcher else []) + \
+        [(t.get("addr"), "top_seller") for t in tri.get("top_sellers") or [] if isinstance(t, dict)] + \
+        [(t.get("addr"), t.get("role") or "tracked") for t in tri.get("tracked") or [] if isinstance(t, dict)]
+    seen, wallets = set(), []
+    for addr, role in cands:
+        a = (addr or "").lower()
+        if a and a not in seen:
+            seen.add(a)
+            wallets.append({"addr": a, "role": str(role)})
+    if not wallets:
+        return None
+    case = conn.execute("SELECT chain_id, subject FROM cases WHERE id=?", (case_id,)).fetchone()
+    if not case:
+        return None
+    payload = {"chain_id": case["chain_id"], "token": case["subject"], "wallets": wallets[:MONEY_MAX_WALLETS],
+               "omitted": [w["addr"] for w in wallets[MONEY_MAX_WALLETS:]]}
+    return queue.enqueue_tx(conn, case_id, "money_trail", payload, JOB_VERSION)
+
+
 def record_result(conn, case_id, run_id, kind, result):
     """Write separate, three-valued assertions from a finished job (own transaction). See record_result_tx."""
     with db.tx(conn):
@@ -121,6 +150,18 @@ def record_result_tx(conn, case_id, run_id, kind, result):
         if lc:
             _put(conn, case_id, run_id, tok, "snipe_tax_exemptions_declared", str(len(lc.get("snipe_tax_exemptions") or [])),
                  bool(lc.get("snipe_tax_exemptions")), "decoded from launch calldata", "launchcall/0.1")
+    elif kind == "money_trail":
+        trail = result.get("trail") if isinstance(result.get("trail"), dict) else {}
+        tv = trail.get("verdict") if isinstance(trail.get("verdict"), dict) else {}
+        n = len(trail.get("wallets") or [])
+        complete = trail.get("complete") is True and n > 0
+        for k in ("sale_proceeds_received", "token_parked_in_non_venue_contract", "token_sent_to_bridge", "proceeds_left_wallet", "proceeds_reached_bridge_or_exchange"):
+            if k in tv:
+                val = tv[k]
+                _put(conn, case_id, run_id, result.get("token"), k, f"{n} wallets",
+                     val if val is True or (val is False and complete) else None,  # a 'no' needs a complete trail; a 'YES' stands on its own
+                     "explorer pages for launcher + top sellers; a disposal with no quote asset credited is a transfer, not a sale; "
+                     "ownership of endpoints unknown" + ("" if complete else "; trail incomplete"), MONEY_RULE)
     elif kind == "rug_deep":
         dh = result.get("dev_history") or {}
         if dh:
