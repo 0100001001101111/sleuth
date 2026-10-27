@@ -151,7 +151,7 @@ class FakeClient:
 
 
 def _chains(budget_after=None, truncate=()):
-    c1 = FakeClient("1", PAGES_1, ADDR_1, COUNTERS_1, FULL, truncate=truncate, budget_after=budget_after)
+    c1 = FakeClient("1", dict(PAGES_1), ADDR_1, COUNTERS_1, FULL, truncate=truncate, budget_after=budget_after)   # own dict: a test may swap a page
     c2 = FakeClient("4663", {}, {}, {}, {})          # explorer has never seen the wallet here
     return c1, {"1": c1, "4663": c2}
 
@@ -523,3 +523,78 @@ def test_swap_output_is_followed_like_the_swept_asset():
     hop = next(h for h in out["next_hops"] if h["addr"] == HOP)
     assert hop["forwarded"][0]["to"] == NEXT and hop["forwarded"][0]["raw"] == str(10 * 10**18)
     assert out["verdict"]["recipient_rehearsal_sends"] is True
+
+
+def test_zero_value_rows_are_not_rehearsal_sends_or_hops():
+    """Two zero-value DAI rows from ATT to a second address (the shape of a spam or poisoning transfer) have the
+    repetition of a rehearsal but move nothing: they are neither rehearsal sends nor a next-hop candidate, and a
+    zero-value row from HOP is not a forward. The real second live run counted three such rows as a hop."""
+    cfg = {"chains": {**CFG["chains"], "1": {**CFG["chains"]["1"], "canonical_tokens": {"USDC": USDC, "DAI": DAI}}}}
+    zero_dest = "0x38630e0000000000000000000000000000000018"
+    swap = "0x" + "a" * 64
+    pages = {k: list(v) for k, v in PAGES_1.items()}
+    pages[(ATT, "token-transfers")] = [tt(V, ATT, 1000_000000, T_SWEEP, TX1),
+                                      tt(ATT, DEX, 999_000000, "2026-10-24T01:00:00.000000Z", swap), tt(DEX, ATT, 998 * 10**18, "2026-10-24T01:00:00.000000Z", swap, token=DAI, sym="DAI", dec="18"),
+                                      tt(ATT, HOP, 10**18, T_H1, "0x" + "e" * 64, token=DAI, sym="DAI", dec="18"),
+                                      tt(ATT, HOP, 10 * 10**18, T_H2, "0x" + "f" * 64, token=DAI, sym="DAI", dec="18"),
+                                      tt(ATT, zero_dest, 0, T_H1, "0x" + "7" * 64, token=DAI, sym="DAI", dec="18"),
+                                      tt(ATT, zero_dest, 0, T_H2, "0x" + "8" * 64, token=DAI, sym="DAI", dec="18")]
+    pages[(HOP, "token-transfers")] = [tt(ATT, HOP, 10**18, T_H1, "0x" + "e" * 64, token=DAI, sym="DAI", dec="18"),
+                                      tt(HOP, NEXT, 0, T_H3, "0x" + "b" * 64, token=DAI, sym="DAI", dec="18")]
+    c1 = _SwappedClient("1", pages, ADDR_1, COUNTERS_1, FULL)
+    c1.cfg, c1.chain = cfg, cfg["chains"]["1"]
+    out = drain.investigate(c1, V, chains={"1": c1, "4663": FakeClient("4663", {}, {}, {}, {})})
+    att = next(s for s in out["suspects"] if s["addr"] == ATT)
+    zero = next(r for r in att["outbound"] if r["addr"] == zero_dest)
+    assert zero["transfers"] == [] and zero["rehearsal"] is False and zero["n"] == 2       # still listed as a destination, never a lead
+    assert att["next_hop_candidates"] == [HOP]
+    hop = next(h for h in out["next_hops"] if h["addr"] == HOP)
+    assert hop["forwarded"] == []
+
+
+def test_later_suspect_pair_yields_to_the_hop_reserve():
+    """With the budget nearly spent after the first suspect pair and a next hop already found, the second pair is
+    skipped as unknown (a budget gap, suspects_unprofiled) so the hop walk, the one read that can reach an exchange,
+    still runs. Four loss recipients are forced by giving the sweep four token credits."""
+    full = dict(FULL)
+    extra = ["0x7700000000000000000000000000000000000021", "0x7700000000000000000000000000000000000022", "0x7700000000000000000000000000000000000023"]
+    full[TX1] = {**FULL[TX1], "token_transfers": FULL[TX1]["token_transfers"] + [tt(V, e, 1_000000, T_SWEEP, TX1) for e in extra]}
+    pages = {k: list(v) for k, v in PAGES_1.items()}
+    pages[(V, "token-transfers")] = PAGES_1[(V, "token-transfers")] + [tt(V, e, 1_000000, T_SWEEP, TX1) for e in extra]
+    c1 = FakeClient("1", pages, ADDR_1, COUNTERS_1, full)
+    c1.budget_after = 10_000                 # remaining() is now a call count; the reserve below is in the same unit
+    out, seen = {}, {}
+
+    real_remaining = c1.remaining
+    def tight():                            # after ATT's pair has been read, report "almost nothing left"
+        return 1 if any("next_hop_candidates" in s and s.get("next_hop_candidates") for s in seen.get("suspects", [])) else real_remaining()
+    c1.remaining = tight
+    orig = drain._Investigation.suspect
+    def spy(self, cl, a, *args, **kw):
+        s = orig(self, cl, a, *args, **kw)
+        seen.setdefault("suspects", []).append(s)
+        return s
+    drain._Investigation.suspect = spy
+    try:
+        out = drain.investigate(c1, V, chains={"1": c1, "4663": FakeClient("4663", {}, {}, {}, {})})
+    finally:
+        drain._Investigation.suspect = orig
+    profiled = [s["addr"] for s in out["suspects"]]
+    assert ATT in profiled and len(profiled) == 2
+    assert any("reserved for the next-hop walk" in g["detail"] for g in out["gaps"])
+    assert any(h["addr"] == HOP and h["complete"] for h in out["next_hops"])
+    assert out["verdict"]["next_hop_first_funded_by_exchange"] is True   # positive evidence on the walked hop stands
+    assert out["complete"] is False                                     # two recipients were never read: the run says so
+    # with no exchange on the walked hop, the hop negatives are unknown, not False: a skipped recipient could have its own hop
+    pages[(HOP, "transactions")] = [tx(FUNDER, HOP, 10**15, "2026-02-05T22:35:47.000000Z", "0x" + "4" * 64)]
+    c1 = FakeClient("1", pages, ADDR_1, COUNTERS_1, full)
+    c1.budget_after, seen["suspects"] = 10_000, []
+    real_remaining = c1.remaining               # tight() must call the NEW client's counter, not its own wrapper
+    c1.remaining = tight
+    drain._Investigation.suspect = spy
+    try:
+        out = drain.investigate(c1, V, chains={"1": c1, "4663": FakeClient("4663", {}, {}, {}, {})})
+    finally:
+        drain._Investigation.suspect = orig
+    assert any("reserved for the next-hop walk" in g["detail"] for g in out["gaps"])
+    assert out["verdict"]["next_hop_first_funded_by_exchange"] is None and out["verdict"]["next_hop_touched_exchange"] is None

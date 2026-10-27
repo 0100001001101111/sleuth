@@ -4,7 +4,7 @@ describe a failed call as "no activity"."""
 import time
 from dataclasses import asdict, dataclass, field
 
-COLLECTOR_VERSION = "collectors/0.1.0"   # bump whenever a predicate, window rule or output shape changes
+COLLECTOR_VERSION = "collectors/0.1.1"   # bump whenever a predicate, window rule or output shape changes
 
 
 @dataclass(frozen=True)

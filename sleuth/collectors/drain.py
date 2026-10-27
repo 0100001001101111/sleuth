@@ -30,7 +30,8 @@ does next, with the explorer (Blockscout API v2) as the only source:
      a chain skipped for time, budget or a provider failure turns every negative into unknown.
 
 Budget: explorer reads fan out in threads; the first (1 - SUSPECT_SHARE) of the budget is for the victim side, the rest
-for suspects. The first batch of loss transactions is always fetched even past that soft line (one batch is the
+for suspects and next hops; once a hop exists, HOP_SHARE of the budget is kept for its walk to first funding and further
+suspect pairs are skipped as unknown. The first batch of loss transactions is always fetched even past that soft line (one batch is the
 minimum useful read), and the case's own chain is read first even when another chain is busier: both by design.
 
 Identity of a token is (chain, contract address), never a symbol. Amounts stay raw strings with decimals beside them.
@@ -46,7 +47,7 @@ from ..client import ApiError, BudgetExceeded, Client
 from .money import _h, _int, _ts
 from .types import COLLECTOR_VERSION
 
-RULE_VERSION = "drain-investigation/0.1"
+RULE_VERSION = "drain-investigation/0.2"    # 0.2: zero-value rows are not sends; hop reserve; hop negatives unknown when a suspect was skipped
 NATIVE = "native"
 PERMIT2 = "0x000000000022d473030f116ddee9f6b43ac78ba3"
 _PROVIDER_ERRORS = (ApiError, OSError, ValueError, TypeError, KeyError, AttributeError)
@@ -73,6 +74,8 @@ CREDIT_WINDOW_S = 120          # a sweep this soon after a credit is a "watched 
 LOSS_TX_CAP = 40               # full-tx fetches per chain (2-3 s each)
 SUSPECT_CAP = 4
 SUSPECT_SHARE = 0.5            # share of the budget kept back for suspect profiling (the "where did it go" half): two pairs of ~45 s each on a slow explorer
+HOP_SHARE = 0.35               # share of the budget reserved for the next-hop walks once a hop exists: a 14-page walk to first funding is ~100-150 s on
+                               # a slow explorer, and the first live run gave the hops only the leftovers, so the exchange funding was never read
 SUSPECT_PAIR = 2               # suspects profiled side by side
 T4_CAP = 8                    # type-4 txs fetched per suspect (other authorities)
 PAGES_PRIMARY, PAGES_SECONDARY, PAGES_SUSPECT = 4, 2, 2
@@ -184,6 +187,7 @@ class _Investigation:
         self.hops_unprofiled = False       # a next hop was not profiled (budget): hop negatives become unknown
         self.t0 = time.time()
         self.soft_deadline = None          # monotonic time after which victim-side reads stop so the suspects get profiled
+        self.hop_reserve_s = None          # seconds kept back for next hops: later suspect pairs are skipped (as unknown) rather than eat it
 
     def past_soft(self):
         return self.soft_deadline is not None and time.monotonic() > self.soft_deadline
@@ -684,7 +688,8 @@ class _Investigation:
                     slot = r["assets"].setdefault(ta, {"symbol": _tok(x).get("symbol"), "raw": 0, "decimals": dec, "canonical": ta in set(self.canonical(cl.chain_id).values())})
                     slot["raw"] += raw or 0
                     r["last"] = max(r["last"] or "", x.get("timestamp") or "")
-                    if ta in followed and after_loss(x.get("timestamp")) and len(r["transfers"]) < 8 and (x.get("transaction_hash") or "").lower() not in trade_txs:   # by contract, never by symbol; a swap counterparty is not a hop
+                    if ta in followed and (raw or 0) > 0 and after_loss(x.get("timestamp")) and len(r["transfers"]) < 8 \
+                            and (x.get("transaction_hash") or "").lower() not in trade_txs:   # by contract, never by symbol; zero-value rows and swap counterparties are not hops
                         r["transfers"].append({"ts": x.get("timestamp"), "asset": ta, "symbol": _tok(x).get("symbol"), "raw": str(raw or 0),
                                                "decimals": dec, "tx": (x.get("transaction_hash") or "").lower()})
             for r in out.values():
@@ -758,8 +763,10 @@ class _Investigation:
             h["is_contract"] = info.get("is_contract")
             h["tx_count"] = _int(cnt.get("transactions_count"))
             n0 = len(self.gaps)
+            # both walks go the full hop depth, side by side: a token credit older than the first coin credit is the usual
+            # shape of a swapper's address, and two token pages left the live hop's first funding "earliest page only"
             (txs, ok1), (tts, ok2) = self.fanout([lambda: self.pages(cl, a, "transactions", HOP_PAGES),
-                                                  lambda: self.pages(cl, a, "token-transfers", PAGES_SUSPECT)])
+                                                  lambda: self.pages(cl, a, "token-transfers", HOP_PAGES)])
             h["pages_complete"] = ok1
             svc = {}
             for t in [x for x in txs if x.get("status") in (None, "ok")] + tts:     # token rows carry no status; failed txs are not contact
@@ -792,8 +799,8 @@ class _Investigation:
                 ta = _tok_addr(_tok(x))
                 if _h(x.get("from")) == a and ta in swept_assets and _h(x.get("to")) and len(h["forwarded"]) < 8:
                     ts = _ts(x.get("timestamp"))
-                    if since_ts is None or (ts is not None and ts >= since_ts):
-                        raw, dec = _total(x)
+                    raw, dec = _total(x)
+                    if (raw or 0) > 0 and (since_ts is None or (ts is not None and ts >= since_ts)):     # a zero-value row moved nothing on
                         text, kind = _label(x.get("to"))
                         h["forwarded"].append({"ts": x.get("timestamp"), "to": _h(x.get("to")), "label": text, "kind": kind, "symbol": _tok(x).get("symbol"),
                                                "raw": str(raw or 0), "decimals": dec, "tx": (x.get("transaction_hash") or "").lower()})
@@ -896,6 +903,7 @@ def investigate(client, victim, incident_ts=None, chains=None, max_chains=2):
     rem = client.remaining()
     if rem is not None:
         inv.soft_deadline = time.monotonic() + max(0.0, rem) * (1 - SUSPECT_SHARE)
+        inv.hop_reserve_s = max(0.0, rem) * HOP_SHARE
     out = {"rule_version": RULE_VERSION, "collector_version": COLLECTOR_VERSION, "victim": victim, "incident_ts": incident_ts,
            "presence": {}, "delegations": {}, "chains": [], "quarantine_total": 0, "suspects": [], "next_hops": [], "relations": [], "verdict": {}, "gaps": inv.gaps,
            "complete": False, "observed_at": time.time(), "timing_s": {}}
@@ -1046,6 +1054,15 @@ def investigate(client, victim, incident_ts=None, chains=None, max_chains=2):
                     inv.gap("budget", f"suspect {a[:12]} not profiled: budget exhausted", cid)
                 inv.suspects_unprofiled = True
                 continue
+            # once a profiled suspect has produced a next hop, the hop walk (the one read that can reach an exchange) outranks
+            # a further suspect pair: skip the pair as unknown rather than let it eat the reserve
+            rem_now = client.remaining()
+            if i > 0 and inv.hop_reserve_s and rem_now is not None and rem_now < inv.hop_reserve_s \
+                    and any(s.get("next_hop_candidates") for s in out["suspects"]):
+                for a, cid in pair:
+                    inv.gap("budget", f"suspect {a[:12]} not profiled: remaining budget reserved for the next-hop walk", cid)
+                inv.suspects_unprofiled = True
+                continue
             profiles = inv.fanout([lambda a=a, cid=cid: inv.suspect(chains[cid], a, recv_assets.get((a, cid), {}), first_loss.get(cid), roles[(a, cid)])
                                    for a, cid in pair])
             for (a, cid), s in zip(pair, profiles):
@@ -1142,7 +1159,8 @@ def _verdicts(out, inv):
                                             recs_ok and all(s.get("loss_time_known") and s.get("balances_read") for s in recs))
         hops = out.get("next_hops") or []
         if hops or inv.hops_unprofiled:
-            hops_ok = not inv.hops_unprofiled and bool(hops) and all(h.get("complete") for h in hops)
+            # a recipient that was never profiled (cap, budget, reserve) could have its own hop: hop negatives are unknown then
+            hops_ok = not inv.hops_unprofiled and not inv.suspects_unprofiled and bool(hops) and all(h.get("complete") for h in hops)
             walked = [h.get("first_funding") or {} for h in hops if h.get("first_funding") and not h["first_funding"].get("earliest_page_only")]
             # a "first" funder is only known when the walk reached the oldest page: an older, unseen credit could exist otherwise
             v["next_hop_first_funded_by_exchange"] = tv(any(f.get("kind") == "exchange" for f in walked), hops_ok and len(walked) == len(hops))
