@@ -334,7 +334,8 @@ def _fake_run_job(cfg, kind, payload, budget_s=None):
                               "contact_back": {"ts": "2026-10-25T13:36:11.000000Z", "tx": "0x" + "2" * 64, "raw": "0"},
                               "first_funding": {"ts": "2026-02-05T22:35:47.000000Z", "from": "0x" + "4" * 40, "label": "Binance: Hot Wallet | Exchange", "kind": "exchange", "raw": "3596200000000000", "earliest_page_only": False},
                               "services": [{"addr": "0x" + "4" * 40, "label": "Binance: Hot Wallet | Exchange", "kind": "exchange", "n": 1, "direction": ["in"]}],
-                              "forwarded": [{"ts": "2026-10-27T04:39:59.000000Z", "to": "0x" + "d" * 40, "label": "", "kind": "unknown", "symbol": "DAI", "raw": "10000000000000000000", "decimals": 18}]}],
+                              "forwarded": [{"ts": "2026-10-27T04:39:59.000000Z", "to": "0x" + "d" * 40, "label": "", "kind": "unknown", "symbol": "DAI", "raw": "10000000000000000000", "decimals": 18}],
+                              "clock": {"state": "rhythm", "n": 876, "span_days": 264.3, "quiet_utc": [20, 2], "quiet_share": 0.09, "offsets": [3, 4, 5, 6], "quiet_weekday": {"day": "Fri", "n": 37}}}],
                "relations": [], "gaps": [], "complete": True, "observed_at": 1793077200.0,
                "delegations": {"1": {"known": True, "delegated": True, "delegate": "0x" + "7" * 40, "verified": False, "set_in_loss_tx": "0x" + "1" * 64, "set_by": OTHER}, "4663": {"known": True, "delegated": False}},
                "verdict": {"assets_left_wallet": True, "eip7702_authorization_by_wallet_submitted_by_other": True, "wallet_key_signed_outflow": False,
@@ -370,6 +371,7 @@ def test_drain_follow_up_investigation_and_delegation_warning(web, conn, monkeyp
     assert "Next hops" in page and "the shape of testing a destination" in page and "an exchange withdrawal" in page
     assert "then paid 0x3333333333" in page and "traffic in both directions" in page and "1 DAI on 2026-10-25, 10 DAI on 2026-10-26" in page
     assert "a lead for a law-enforcement request, not a name" in page and "Passed on: 10.000000 DAI" in page
+    assert "night for UTC+3 to UTC+6" in page and "quietest weekday is Fri" in page and "not a location" in page
     assert "who did is unknown" not in page                                                     # the origin of this delegation is known
     assert "1 third-party move(s) that followed this wallet's own exact-amount approval (listed, not counted as loss)" in page   # table
     assert "1 third-party move(s) followed this wallet&#39;s own exact-amount approval" in page                                   # plain words (escaped)

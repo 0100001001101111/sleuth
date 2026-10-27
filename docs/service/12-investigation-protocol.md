@@ -83,7 +83,26 @@ skipped while no hop exists (a reserve with nothing to spend it on would be wast
 takes 100-150 s on a slow explorer. On expiry the candidates are listed as `hops_unprofiled`, a `budget` gap is recorded and
 the three verdicts stay unknown. Partial hop records are kept.
 
-## 8. What the protocol still does not do (MANUAL, backlog in 07)
+## 8. Activity clock (`clock` on every suspect and hop) — IMPLEMENTED
+
+A VPN moves an address's IP; it does not move the hours its operator is awake. For every suspect and hop the collector
+buckets the address's OWN sends by UTC hour from the pages it already read (`activity_clock`): transactions it submitted
+and token rows it sent, de-duplicated to the second. Type-4 (EIP-7702) submissions and their token rows are left out: a
+sweep fires when the victim signs, so its time is the victim's clock (the sweeper addresses in the first live case showed
+the victims' American evenings, nothing about the operator).
+
+- `state = insufficient`: fewer than `CLOCK_MIN_N` (100) own sends or a span under `CLOCK_MIN_DAYS` (14): nothing is said.
+- `state = no_rhythm`: the quietest `CLOCK_QUIET_H` (6) consecutive UTC hours hold more than `CLOCK_QUIET_SHARE` (12 %) of
+  the sends, or the busiest six hold under `CLOCK_BUSY_SHARE` (40 %; a flat day holds 25 %): "automated or shared, more likely than one person".
+- `state = rhythm`: `quiet_utc` is that window and `offsets` lists the UTC offsets for which it starts between 23:00 and
+  02:00 local. Stated as "the hours that are night for UTC+3 to UTC+6": a clock, never a place, and the sentence names
+  what breaks it (a bot, shift work, a shared wallet). `quiet_weekday` is reported only with 200+ sends and a weekday
+  at half the mean or less (a Friday dip is a crumb, not a calendar).
+
+First live case: dest-A's 876 sends over nine months go quiet 20:00-02:00 UTC (9 %), night for UTC+3 to UTC+6, with Friday
+at a third of the other days; the loot wallet and the operators had too few non-sweep sends to read.
+
+## 9. What the protocol still does not do (MANUAL, backlog in 07)
 
 - It does not scan a bundler's or a block range's type-4 transactions to find who installed a delegation that moved nothing.
 - It does not follow a hop's forwarded funds to a second hop (depth 1 only; `forwarded` rows are listed for a human).

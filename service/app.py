@@ -39,6 +39,7 @@ templates.env.filters["short"] = R.short
 templates.env.filters["question"] = plain.question
 templates.env.filters["meaning"] = plain.meaning
 templates.env.filters["plain_gap"] = plain.gap_text
+templates.env.filters["clock_words"] = plain.clock_words
 app = FastAPI(title="Sleuth incident service", version=SERVICE_VERSION, docs_url=None, redoc_url=None)
 basic = HTTPBasic()
 BASIC = Depends(basic)

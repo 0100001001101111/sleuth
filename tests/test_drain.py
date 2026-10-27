@@ -442,9 +442,53 @@ def test_next_hop_profiled_back_to_exchange_funding_and_rehearsal():
     assert hop["contact_back"]["ts"].startswith("2026-10-25T13:36")
     assert [s["kind"] for s in hop["services"]] == ["exchange"] and hop["services"][0]["direction"] == ["in"]
     assert hop["forwarded"][0]["to"] == NEXT and hop["forwarded"][0]["raw"] == "1000000"
+    assert hop["clock"]["state"] == "insufficient" and att["clock"]["state"] == "insufficient"   # every profile carries a clock
     v = out["verdict"]
     assert v["recipient_rehearsal_sends"] is True
     assert v["next_hop_first_funded_by_exchange"] is True and v["next_hop_touched_exchange"] is True
+
+
+def _stamps(days, hours, per_hour=1, start_day=1):
+    """Synthetic UTC timestamps: for each day from Sep 2026 and each hour given, per_hour distinct seconds."""
+    import datetime as dt
+    base = dt.datetime(2026, 9, 1, tzinfo=dt.UTC)
+    out = []
+    for d in range(days):
+        for h in hours:
+            for k in range(per_hour):
+                out.append((base + dt.timedelta(days=start_day + d, hours=h, seconds=k)).strftime("%Y-%m-%dT%H:%M:%S.000000Z"))
+    return out
+
+
+def test_activity_clock_reads_a_daytime_rhythm_and_ignores_victim_triggered_rows():
+    """An address awake 08:00-20:00 UTC for 30 days has a quiet window centred on the small hours, which is night for
+    UTC+0..+3; type-4 submissions are the victim's clock and never count; a flat day is no rhythm; too few sends say
+    nothing at all. The reading is offsets, never a place."""
+    A = "0x" + "e" * 40
+    day = _stamps(30, range(8, 20))                       # 360 sends over 30 days, all daytime UTC
+    txs = [tx(A, HOP, 1, s, "0x" + f"{i:064x}") for i, s in enumerate(day)]
+    ck = drain.activity_clock(txs, [], A)
+    assert ck["state"] == "rhythm" and ck["n"] == 360 and ck["quiet_utc"] == [23, 5] and ck["quiet_share"] == 0.0
+    assert ck["offsets"] == [0, 1, 2, 3] and ck["quiet_weekday"] is None and sum(ck["hours"]) == 360
+    # the same sends as type-4 (EIP-7702) submissions, plus their token rows: victim-triggered, left out
+    t4 = [tx(A, HOP, 1, s, "0x" + f"{i:064x}", typ="4") for i, s in enumerate(day)]
+    rows = [tt(A, HOP, 1, s, "0x" + f"{i:064x}") for i, s in enumerate(day)]
+    assert drain.activity_clock(t4, rows, A)["state"] == "insufficient"
+    assert drain.activity_clock(t4, rows, A)["n"] == 0
+    # token rows the address sent in ordinary transactions do count (same clock, de-duplicated to the second)
+    assert drain.activity_clock(txs, rows, A)["n"] == 360
+    # round-the-clock sends: no rhythm, stated as automated or shared
+    flat = [tx(A, HOP, 1, s, "0x" + f"{i:064x}") for i, s in enumerate(_stamps(20, range(24)))]
+    assert drain.activity_clock(flat, [], A)["state"] == "no_rhythm"
+    # under the floor (or under 14 days) nothing is said, however sharp the shape
+    few = [tx(A, HOP, 1, s, "0x" + f"{i:064x}") for i, s in enumerate(_stamps(5, range(8, 20)))]
+    assert drain.activity_clock(few, [], A)["state"] == "insufficient"
+    # the sentence names offsets and what breaks the reading, never a country
+    from service.plain import clock_words
+    words = clock_words(ck)
+    assert "night for UTC+0 to UTC+3" in words and "not a location" in words and "23:00 and 05:00 UTC" in words
+    assert clock_words(drain.activity_clock(flat, [], A)).startswith(" Its own sends (480") and "no daily rhythm" in clock_words(drain.activity_clock(flat, [], A))
+    assert clock_words({"state": "insufficient"}) == "" and clock_words(None) == ""
 
 
 def test_next_hop_negatives_unknown_when_pages_truncated():

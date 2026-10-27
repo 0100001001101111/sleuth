@@ -210,6 +210,31 @@ def _when(ts):
         return ""
 
 
+def _offset(o):
+    return f"UTC{o:+d}"
+
+
+def clock_words(ck):
+    """The activity clock as a sentence: a rhythm names the quiet UTC hours and the offsets they are night for (a clock,
+    never a place); a flat day says automated or shared; too little data says nothing at all."""
+    if not isinstance(ck, dict):
+        return ""
+    if ck.get("state") == "rhythm" and ck.get("quiet_utc") and ck.get("offsets"):
+        q = ck["quiet_utc"]
+        offs = ck["offsets"]
+        rng = f"{_offset(offs[0])} to {_offset(offs[-1])}" if len(offs) > 1 else _offset(offs[0])
+        s = (f" Its own sends ({ck.get('n')} over {ck.get('span_days')} days) go quiet between {q[0]:02d}:00 and {q[1]:02d}:00 UTC "
+             f"({round((ck.get('quiet_share') or 0) * 100)}% of them fall there), the hours that are night for {rng}. "
+             "That is a clock, not a location: a VPN does not move it, but a bot, a shift worker or a shared wallet breaks it.")
+        qw = ck.get("quiet_weekday")
+        if isinstance(qw, dict):
+            s += f" Its quietest weekday is {qw.get('day')} ({qw.get('n')} sends)."
+        return s
+    if ck.get("state") == "no_rhythm":
+        return f" Its own sends ({ck.get('n')} over {ck.get('span_days')} days) show no daily rhythm: automated or shared, more likely than one person at a keyboard."
+    return ""
+
+
 def _investigation_words(v, inv):
     """Plain sentences for the drain investigation: how it left, where it went, and the standing risk."""
     out = []
@@ -272,6 +297,7 @@ def _investigation_words(v, inv):
         if fw:
             s += (f" It passed {_amt(fw.get('raw'), fw.get('decimals'))} {fw.get('symbol') or '?'} on to {(fw.get('to') or '')[:12]}…"
                   + (f" ({fw['label']})" if fw.get("label") else "") + f" on {(fw.get('ts') or '')[:10]}.")
+        s += clock_words(hp.get("clock"))
         if not hp.get("complete"):
             s += " This hop was only partly read."
         out.append(s)

@@ -81,6 +81,68 @@ T4_CAP = 8                    # type-4 txs fetched per suspect (other authoritie
 PAGES_PRIMARY, PAGES_SECONDARY, PAGES_SUSPECT = 4, 2, 2
 
 
+# -- activity clock ------------------------------------------------------------------------------------------------
+CLOCK_MIN_N, CLOCK_MIN_DAYS = 100, 14     # fewer own sends, or a shorter span, and no clock is read at all
+CLOCK_QUIET_H, CLOCK_QUIET_SHARE = 6, 0.12   # a daily rhythm = the quietest 6 UTC hours hold <= 12 % of the sends
+CLOCK_BUSY_SHARE = 0.40                      # ... and the busiest 6 hold 40 %+ (a flat day holds 25 % in any 6)
+_WD = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def activity_clock(txs, tts, addr):
+    """Hour-of-day rhythm of an address's OWN sends. A VPN moves an IP, not the hours someone is awake, so the quietest
+    stretch of the day is a clock the operator cannot hide; it is stated as UTC offsets the night is consistent with,
+    never as a place, and only when there are enough sends over enough days to carry a rhythm. Type-4 (EIP-7702)
+    submissions and their token rows are left out: a sweep fires when the VICTIM signs, so its time is the victim's
+    clock, not the operator's (the sweeper addresses in the first live case had no readable clock once these were out).
+    A bot, a shift worker or a shared wallet breaks the reading, and the sentence says so."""
+    a = (addr or "").lower()
+    t4 = {(t.get("hash") or "").lower() for t in txs if isinstance(t, dict) and str(t.get("type")) == "4"}
+    stamps = set()
+    for t in txs:
+        if isinstance(t, dict) and _h(t.get("from")) == a and str(t.get("type")) != "4" and t.get("status") in (None, "ok"):
+            stamps.add((t.get("timestamp") or "")[:19])
+    for x in tts:
+        if isinstance(x, dict) and _h(x.get("from")) == a and (x.get("transaction_hash") or "").lower() not in t4:
+            stamps.add((x.get("timestamp") or "")[:19])
+    stamps = sorted(s for s in stamps if _ts(s) is not None)
+    out = {"state": "insufficient", "n": len(stamps), "span_days": 0, "hours": [0] * 24, "weekdays": {}, "quiet_utc": None,
+           "quiet_share": None, "offsets": [], "quiet_weekday": None}
+    if not stamps:
+        return out
+    out["span_days"] = round((_ts(stamps[-1]) - _ts(stamps[0])) / 86400, 1)
+    for s in stamps:
+        out["hours"][int(s[11:13])] += 1
+        wd = _WD[time.gmtime(_ts(s)).tm_wday]
+        out["weekdays"][wd] = out["weekdays"].get(wd, 0) + 1
+    if len(stamps) < CLOCK_MIN_N or out["span_days"] < CLOCK_MIN_DAYS:
+        return out
+    hours = out["hours"]
+    win = [sum(hours[(st + k) % 24] for k in range(CLOCK_QUIET_H)) for st in range(24)]
+    lo = min(win)
+    starts = [st for st in range(24) if win[st] == lo]
+    # ties (several equally quiet windows, usually a run of empty hours): take the middle of the circular run; it may
+    # wrap midnight, so begin at a start whose predecessor is not one (all 24 tied: begin at 0)
+    heads = [st for st in starts if (st - 1) % 24 not in starts]
+    run = [heads[0] if heads else 0]
+    while (run[-1] + 1) % 24 in starts and len(run) < 24:
+        run.append((run[-1] + 1) % 24)
+    qs = run[len(run) // 2]
+    out["quiet_utc"] = [qs, (qs + CLOCK_QUIET_H) % 24]
+    out["quiet_share"] = round(lo / len(stamps), 3)
+    wmean = len(stamps) / 7
+    low_wd = min(out["weekdays"].items(), key=lambda kv: kv[1]) if len(out["weekdays"]) == 7 else None
+    if len(stamps) >= 200 and low_wd and low_wd[1] <= 0.5 * wmean:
+        out["quiet_weekday"] = {"day": low_wd[0], "n": low_wd[1]}
+    if out["quiet_share"] > CLOCK_QUIET_SHARE or max(win) < CLOCK_BUSY_SHARE * len(stamps):
+        out["state"] = "no_rhythm"            # flat: automated, shared, or round-the-clock
+        return out
+    # offsets for which the quiet window starts between 23:00 and 02:00 local (the core of a night)
+    offs = sorted({((loc - qs) + 12) % 24 - 12 for loc in (23, 0, 1, 2)})
+    out["offsets"] = [o if o != -12 else 12 for o in offs]
+    out["state"] = "rhythm"
+    return out
+
+
 def _label(o):
     """Explorer address object -> (text label, kind). kind from explorer tags only: a LEAD, stated as such."""
     o = o if isinstance(o, dict) else {}
@@ -573,7 +635,7 @@ class _Investigation:
         a = addr.lower()
         s = {"addr": a, "chain_id": cl.chain_id, "roles": sorted(set(roles)), "label": None, "kind": None, "is_contract": None, "tx_count": None,
              "other_authorities": None, "authorities_sample": [], "delegates": [], "swept_in": {}, "outbound": [], "sinks_after_loss": [],
-             "first_funding": None, "holds": {}, "swept_assets_victim": sorted(swept_assets), "coin_raw": None, "complete": True, "notes": []}
+             "first_funding": None, "holds": {}, "swept_assets_victim": sorted(swept_assets), "coin_raw": None, "complete": True, "notes": [], "clock": None}
         problems = 0                      # this profile's own failures; the shared gap list also carries the sibling's
 
         def sg(kind, detail):
@@ -695,6 +757,7 @@ class _Investigation:
             for r in out.values():
                 r["native_raw"] = str(r["native_raw"])
                 r["assets"] = {k: {**v, "raw": str(v["raw"])} for k, v in r["assets"].items()}
+            s["clock"] = activity_clock(txs, tts, a)       # two pages rarely carry a rhythm; the hop walk usually does
             # the exit verdict looks at EVERY destination read, not the 15 shown
             s["sinks_after_loss"] = sorted(r["addr"] for r in out.values() if r["kind"] in ("exchange", "privacy_pool", "bridge") and r["after_loss_n"])
             s["outbound"] = sorted(out.values(), key=lambda r: (-r["after_loss_n"], -r["n"]))[:15]
@@ -752,7 +815,7 @@ class _Investigation:
         request can reach), the labelled services it touched, whether it sent anything back to the recipient (two-way
         contact) and whether it passed the asset on. Every statement carries how far the pages were read."""
         a = addr.lower()
-        h = {"addr": a, "chain_id": cl.chain_id, "origin": origin, "received": transfers, "rehearsal": bool(rehearsal), "label": None, "kind": None,
+        h = {"addr": a, "chain_id": cl.chain_id, "origin": origin, "received": transfers, "rehearsal": bool(rehearsal), "label": None, "kind": None, "clock": None,
              "is_contract": None, "tx_count": None, "first_funding": None, "services": [], "contact_back": None, "forwarded": [],
              "pages_complete": False, "complete": False}
         try:
@@ -804,6 +867,7 @@ class _Investigation:
                         text, kind = _label(x.get("to"))
                         h["forwarded"].append({"ts": x.get("timestamp"), "to": _h(x.get("to")), "label": text, "kind": kind, "symbol": _tok(x).get("symbol"),
                                                "raw": str(raw or 0), "decimals": dec, "tx": (x.get("transaction_hash") or "").lower()})
+            h["clock"] = activity_clock(txs, tts, a)
             h["complete"] = ok1 and ok2 and len(self.gaps) == n0
         except BudgetExceeded:
             self.exhausted = True
