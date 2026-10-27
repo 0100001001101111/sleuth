@@ -14,7 +14,7 @@ MIN_WINDOW = 1_000    # stop splitting below this and record a gap instead
 def _norm(lg):
     """Raw log -> stable record. Keeps every topic so callers can tell ERC-20 (3 topics) from ERC-721 (4 topics)."""
     try:
-        return {"tx": lg["transactionHash"], "block": int(lg["blockNumber"], 16), "idx": int(lg["logIndex"], 16),
+        return {"tx": _hash32(lg["transactionHash"]), "block": int(lg["blockNumber"], 16), "idx": int(lg["logIndex"], 16),
                 "address": lg["address"].lower(), "topics": [t.lower() for t in lg["topics"]], "data": lg.get("data", "0x"),
                 "block_hash": _hash32(lg["blockHash"])}
     except (KeyError, TypeError, ValueError, AttributeError) as e:
@@ -22,10 +22,10 @@ def _norm(lg):
 
 
 def _hash32(h):
-    """Canonical 0x + 64 lowercase hex, or ValueError: evidence keys and reorg checks compare these as strings."""
+    """Canonical 0x + 64 lowercase hex (block or tx hash), or ValueError: evidence keys and reorg checks compare these as strings."""
     h = str(h).lower()
     if len(h) != 66 or not h.startswith("0x") or any(c not in "0123456789abcdef" for c in h[2:]):
-        raise ValueError(f"bad block hash {h[:20]}")
+        raise ValueError(f"bad 32-byte hash {h[:20]}")
     return h
 
 

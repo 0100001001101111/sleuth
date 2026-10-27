@@ -19,6 +19,7 @@ from .base import PaymentError
 
 SCHEME, NETWORK, ASSET_NAME = "exact", "base", "USDC"
 PROTOCOL_VERSION = 1
+CLAIM_S = 300.0  # a 'computing' claim older than this belongs to a dead process and may be taken over
 
 
 class MockFacilitator:
@@ -92,18 +93,27 @@ def _record_settlement(conn, key, payment, req, tx):
 
 def gate(conn, facilitator, payment, req, params, collector_version, compute):
     """Run the idempotent paid request. Returns (status, body). Status 402 = not paid / invalid / in progress;
-    200 = result (and the settlement receipt in body['payment']). `compute()` is called at most once per replay key."""
-    pid, rh = payment["payment_id"], request_hash(params)
+    200 = result (and the settlement receipt in body['payment']). `compute()` is called at most once per replay key
+    unless the process holding a 'computing' claim died (claim older than CLAIM_S): then one retry recomputes."""
+    pid, rh = payment["payment_id"], request_hash({"params": params, "requirements": req})  # price/payTo are part of the binding
     key = f"{pid}:{rh}:{collector_version}"
-    # one payment_id <-> one request: a different request_hash or collector version is refused before any work
+    busy = {"error": "this payment is being processed; retry shortly with the same payment_id"}
+    bound = {"error": "payment_id already bound to a different request; use a fresh payment", "accepts": [req]}
+    # one payment_id <-> one request (enforced by UNIQUE(payment_id); this lookup only gives the clearer message)
     other = conn.execute("SELECT key FROM x402_replays WHERE payment_id=? AND key!=?", (pid, key)).fetchone()
     if other:
-        return 402, {"error": "payment_id already bound to a different request; use a fresh payment", "accepts": [req]}
+        return 402, bound
     row = conn.execute("SELECT * FROM x402_replays WHERE key=?", (key,)).fetchone()
+    reclaimed = False
+    if row and row["state"] == "computing":  # a claim whose owner died is taken over once; a live one is told to retry
+        with db.tx(conn):
+            n = conn.execute("UPDATE x402_replays SET updated_at=? WHERE key=? AND state='computing' AND updated_at<?",
+                             (db.now(), key, db.now() - CLAIM_S)).rowcount
+        if n != 1:
+            return 402, busy
+        row, reclaimed = None, True
     if row and row["state"] == "settled":
         return 200, dict(db.loads(row["response_json"]), payment={"settled": True, "transaction": row["settle_ref"], "replay": True})
-    if row and row["state"] == "computing":
-        return 402, {"error": "this payment is being processed; retry shortly with the same payment_id"}
     if row and row["state"] == "failed":
         return 402, {"error": "settlement failed for this payment; use a fresh payment", "accepts": [req]}
     if row and row["state"] == "computed":  # crashed between settle and commit, or settle raised: reconcile first
@@ -120,14 +130,16 @@ def gate(conn, facilitator, payment, req, params, collector_version, compute):
         v = facilitator.verify(payment, req)
         if not v.get("isValid"):
             return 402, {"error": "payment invalid", "reason": v.get("invalidReason"), "accepts": [req]}
-        try:  # atomic claim: a concurrent duplicate request hits the primary key and is told to retry, never recomputes
-            with db.tx(conn):
-                conn.execute("INSERT INTO x402_replays (key, payment_id, request_hash, collector_version, state, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
-                             (key, pid, rh, collector_version, "computing", db.now(), db.now()))
-        except (db.DbError, db.sqlite3.IntegrityError) as e:
-            if "UNIQUE" not in str(e) and "PRIMARY" not in str(e):
-                raise
-            return 402, {"error": "this payment is being processed; retry shortly with the same payment_id"}
+        if not reclaimed:
+            try:  # atomic claim: a concurrent duplicate hits the primary key (same request) or UNIQUE(payment_id) (other request)
+                with db.tx(conn):
+                    conn.execute("INSERT INTO x402_replays (key, payment_id, request_hash, collector_version, state, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+                                 (key, pid, rh, collector_version, "computing", db.now(), db.now()))
+            except (db.DbError, db.sqlite3.IntegrityError) as e:
+                if "UNIQUE" not in str(e) and "PRIMARY" not in str(e):
+                    raise
+                taken = conn.execute("SELECT key FROM x402_replays WHERE payment_id=?", (pid,)).fetchone()
+                return 402, (bound if taken and taken["key"] != key else busy)
         try:
             response = compute()
         except Exception as e:  # noqa: BLE001 - release the claim so the same payment can retry; nothing was charged

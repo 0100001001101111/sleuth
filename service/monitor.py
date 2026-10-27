@@ -56,15 +56,30 @@ def _record(conn, sub, token, lg, finality):
         return False
 
 
+class CursorMoved(Exception):
+    """Another worker advanced this subscription's cursor during our scan; our write was refused (compare-and-swap)."""
+
+
 def _scan(client, token, addrs, lo, hi):
-    items, gaps = [], []
+    """Scan EVERY address; the cursor may only advance to the lowest block all of them are complete through, else a
+    later address would resume past blocks it never saw. Items above that block are discarded by the caller."""
+    items, gaps, through = [], [], hi
     for a in addrs:
         res = scan_topics(client, [TRANSFER, pad(a)], Span(lo, hi))
         items.extend(res.items)
         gaps.extend(g.detail for g in res.gaps)
         if not res.coverage.complete:
-            return items, gaps, res.coverage.checked_through
-    return items, gaps, hi
+            through = min(through, res.coverage.checked_through)
+    return items, gaps, through
+
+
+def _cas(conn, sub, sets, values):
+    """Cursor write conditioned on the cursors this tick started from (NULL-safe `IS`)."""
+    n = conn.execute(f"UPDATE monitoring_subscriptions SET {sets}, updated_at=? WHERE id=? AND provisional_cursor IS ? AND provisional_hash IS ?"
+                     " AND finalized_cursor IS ? AND finalized_hash IS ?",
+                     (*values, db.now(), sub["id"], sub.get("provisional_cursor"), sub.get("provisional_hash"), sub.get("finalized_cursor"), sub.get("finalized_hash"))).rowcount
+    if n != 1:
+        raise CursorMoved(f"subscription {sub['id']} cursors changed under us; tick discarded")
 
 
 def rollback(conn, sub, ancestor_block):
@@ -76,7 +91,7 @@ def rollback(conn, sub, ancestor_block):
         conn.execute("DELETE FROM evidence_items WHERE case_id=? AND run_id=? AND finality='provisional' AND block>?", (sub["case_id"], sub["id"], ancestor_block))
         for h in hashes:
             conn.execute("DELETE FROM notification_outbox WHERE case_id=? AND state='pending' AND dedup_key LIKE ?", (sub["case_id"], f"%:{h}:%"))
-        conn.execute("UPDATE monitoring_subscriptions SET provisional_cursor=?, provisional_hash=NULL, updated_at=? WHERE id=?", (ancestor_block, db.now(), sub["id"]))
+        _cas(conn, sub, "provisional_cursor=?, provisional_hash=NULL", (ancestor_block,))
         db.audit(conn, "monitor", "reorg_rollback", sub["id"], {"ancestor": ancestor_block, "dropped_hashes": hashes})
     return len(hashes)
 
@@ -87,7 +102,9 @@ def common_ancestor(client, conn, sub):
                         (sub["case_id"], sub["id"], REORG_DEPTH_MAX)).fetchall()
     for r in rows:
         _, h = block_hash(client, r["block"])
-        if h and h == r["block_hash"]:
+        if h is None:  # cannot tell whether this block survived: a provider failure, never grounds to roll back further
+            raise RpcError(f"ancestor search: hash of block {r['block']} unavailable")
+        if h == r["block_hash"]:
             return r["block"]
     return sub["finalized_cursor"] or (sub["provisional_cursor"] or 0) - REORG_DEPTH_MAX
 
@@ -129,7 +146,7 @@ def tick(client, conn, sub):
                 anc = common_ancestor(client, conn, sub)
                 rollback(conn, sub, anc)
                 out["reorg"], pc = True, anc
-                sub["provisional_cursor"] = anc
+                sub["provisional_cursor"], sub["provisional_hash"] = anc, None
         # 2. finalized scan + notifications (finalized-only). All RPC happens before the transaction opens.
         fc = sub.get("finalized_cursor")
         f_lo = (fc + 1) if fc is not None else int(sub["start_block"]) if sub.get("start_block") else max(0, final_n - 1)
@@ -147,7 +164,8 @@ def tick(client, conn, sub):
                                        "block_hash": lg["block_hash"], "from": "0x" + lg["topics"][1][-40:], "to": "0x" + lg["topics"][2][-40:]}):
                         out["notified"] += 1
                     out["new_final"] += 1
-                conn.execute("UPDATE monitoring_subscriptions SET finalized_cursor=?, finalized_hash=?, updated_at=? WHERE id=?", (through, th, db.now(), sub["id"]))
+                _cas(conn, sub, "finalized_cursor=?, finalized_hash=?", (through, th))
+            sub["finalized_cursor"], sub["finalized_hash"] = through, th
             if gaps:
                 raise RpcError("; ".join(gaps)[:200])
         # 3. provisional scan (no notifications)
@@ -159,12 +177,16 @@ def tick(client, conn, sub):
                 for lg in items:
                     if lg["block"] <= through and _record(conn, sub, token, lg, "provisional"):
                         out["new_provisional"] += 1
-                conn.execute("UPDATE monitoring_subscriptions SET provisional_cursor=?, provisional_hash=?, updated_at=? WHERE id=?", (through, th, db.now(), sub["id"]))
+                _cas(conn, sub, "provisional_cursor=?, provisional_hash=?", (through, th))
+            sub["provisional_cursor"], sub["provisional_hash"] = through, th
             if gaps:
                 raise RpcError("; ".join(gaps)[:200])
         with db.tx(conn):
             conn.execute("UPDATE monitoring_subscriptions SET state=CASE WHEN ends_at<? THEN 'ended' ELSE 'active' END, last_success_at=?, last_error=NULL,"
                          " lag_blocks=?, next_due_at=?, updated_at=? WHERE id=?", (db.now(), db.now(), 0, db.now() + POLL_S, db.now(), sub["id"]))
+    except CursorMoved as e:  # the other worker's tick owns this row now; record nothing
+        out["error"] = str(e)
+        log.warning("%s", e)
     except PROVIDER_ERRORS as e:
         out["error"] = f"{type(e).__name__}: {str(e)[:160]}"
         with db.tx(conn):

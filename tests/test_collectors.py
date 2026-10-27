@@ -167,3 +167,15 @@ def test_coordinated_launch_is_three_valued():
     r = ring.coordinated_launch(recs[:4], 100, supply, market=market, coverage_complete=False)
     assert r["verdict"] is None and "incomplete" in r["reason"]
     assert ring.coordinated_launch([], None, supply)["verdict"] is None
+
+
+def test_drain_screen_is_incomplete_when_delegation_check_fails():
+    """Complete event coverage is not a complete run while the delegation predicate is unknown; and a malformed
+    eth_getCode value is unknown, never a 'no'."""
+    c = FakeClient([], code=None)   # eth_getCode returns nothing
+    out = drain_screen(c, VICTIM, span=Span(0, 29_999))
+    assert out["predicates"]["transfer_event_from_victim"] is False   # events are complete on their own
+    assert out["predicates"]["delegation_observed_at_block"] is None and out["complete"] is False
+    assert delegation(FakeClient([], code=""), VICTIM)["delegated"] is None
+    assert delegation(FakeClient([], code="0xzz"), VICTIM)["delegated"] is None
+    assert delegation(FakeClient([], code="0x"), VICTIM)["observed_block_hash"] == "0x" + "cd" * 32

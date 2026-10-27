@@ -49,9 +49,9 @@ def lease(conn, worker_id, lease_s=LEASE_S):
 
 def heartbeat(conn, run_id, worker_id, lease_s=LEASE_S):
     t = db.now()
-    with db.tx(conn):
-        return conn.execute("UPDATE investigation_runs SET heartbeat_at=?, lease_expires_at=? WHERE id=? AND leased_by=? AND state='leased'",
-                            (t, t + lease_s, run_id, worker_id)).rowcount == 1
+    with db.tx(conn):  # an expired lease is never revived by a late heartbeat: another worker may be about to take it
+        return conn.execute("UPDATE investigation_runs SET heartbeat_at=?, lease_expires_at=? WHERE id=? AND leased_by=? AND state='leased' AND lease_expires_at>=?",
+                            (t, t + lease_s, run_id, worker_id, t)).rowcount == 1
 
 
 def finish(conn, run_id, worker_id, state, result=None, error=None, after=None):

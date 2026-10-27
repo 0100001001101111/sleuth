@@ -52,10 +52,12 @@ CREATE TABLE IF NOT EXISTS payments (
 CREATE UNIQUE INDEX IF NOT EXISTS payments_settled_tx ON payments(network, tx_hash) WHERE tx_hash IS NOT NULL;
 CREATE TABLE IF NOT EXISTS x402_replays (
   key TEXT PRIMARY KEY, payment_id TEXT NOT NULL, request_hash TEXT NOT NULL, collector_version TEXT NOT NULL,
-  state TEXT NOT NULL, response_json TEXT, settle_ref TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL);
+  state TEXT NOT NULL, response_json TEXT, settle_ref TEXT, created_at REAL NOT NULL, updated_at REAL NOT NULL,
+  UNIQUE (payment_id));
 CREATE TABLE IF NOT EXISTS audit_events (
   id TEXT PRIMARY KEY, at REAL NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, target TEXT, detail_json TEXT);
 """
+SCHEMA_VERSION = 2  # bump on every schema edit; an older file is refused (no migrations in the pilot), never silently reused
 
 
 class DbError(Exception):
@@ -76,7 +78,13 @@ def connect(db_path=None):
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA busy_timeout=5000")
+        have = conn.execute("PRAGMA user_version").fetchone()[0]
+        fresh = conn.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table'").fetchone()[0] == 0
+        if not fresh and have != SCHEMA_VERSION:  # CREATE IF NOT EXISTS cannot add columns or constraints to an old file
+            conn.close()
+            raise DbError(f"{p} has schema version {have}, this code needs {SCHEMA_VERSION}; no migration tool in the pilot: delete the scratch db")
         conn.executescript(SCHEMA)
+        conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         return conn
     except sqlite3.Error as e:
         raise DbError(f"open {p}: {e}")

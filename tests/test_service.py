@@ -136,10 +136,19 @@ def test_x402_idempotent_compute_and_crash_reconcile(conn):
     assert st == 200 and len(calls) == 3
     # a concurrent duplicate sees the 'computing' claim and is told to retry instead of recomputing
     with db.tx(conn):
+        rh = x402.request_hash({"params": params, "requirements": req})
         conn.execute("INSERT INTO x402_replays (key, payment_id, request_hash, collector_version, state, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
-                     (f"p5:{x402.request_hash(params)}:v1", "p5", x402.request_hash(params), "v1", "computing", db.now(), db.now()))
+                     (f"p5:{rh}:v1", "p5", rh, "v1", "computing", db.now(), db.now()))
     st, body = x402.gate(conn, fac, {"payment_id": "p5", "signature": "ok"}, req, params, "v1", compute)
     assert st == 402 and "being processed" in body["error"] and len(calls) == 3
+    # the same claim left by a dead process (older than CLAIM_S) is taken over exactly once and completed
+    conn.execute("UPDATE x402_replays SET updated_at=? WHERE payment_id='p5'", (db.now() - x402.CLAIM_S - 1,))
+    st, body = x402.gate(conn, fac, {"payment_id": "p5", "signature": "ok"}, req, params, "v1", compute)
+    assert st == 200 and len(calls) == 4 and "p5" in fac.settled
+    # the schema itself refuses a second row for one payment_id (the race two concurrent gates would otherwise win)
+    with pytest.raises(db.DbError, match="UNIQUE"), db.tx(conn):
+        conn.execute("INSERT INTO x402_replays (key, payment_id, request_hash, collector_version, state, created_at, updated_at) VALUES (?,?,?,?,?,?,?)",
+                     ("p5:other:v1", "p5", "other", "v1", "computing", db.now(), db.now()))
 
 
 # ---------------------------------------------------------------- monitor
@@ -374,6 +383,8 @@ def test_retry_wait_at_cap_is_terminal_and_stale_finish_rejected(conn):
     queue.lease(conn, "w")
     conn.execute("UPDATE investigation_runs SET lease_expires_at=? WHERE id=?", (db.now() - 1, rid2))
     assert not queue.finish(conn, rid2, "w", "succeeded", result={})  # expired lease: a late result is dropped
+    assert not queue.heartbeat(conn, rid2, "w")  # ...and a late heartbeat cannot revive it either
+    assert conn.execute("SELECT lease_expires_at < ? FROM investigation_runs WHERE id=?", (db.now(), rid2)).fetchone()[0] == 1
 
 
 def test_assertions_commit_with_run_state(conn, monkeypatch):
@@ -440,3 +451,57 @@ def test_expired_subscriptions_end_and_screen_brake(conn, web):
         assert A.SCREEN_BRAKE.hit("1.2.3.4")
     assert not A.SCREEN_BRAKE.hit("1.2.3.4") and A.SCREEN_BRAKE.hit("5.6.7.8")
     A.SCREEN_BRAKE.hits.clear()
+
+
+def test_monitor_cursor_only_advances_to_lowest_complete_address(conn):
+    """Two watched addresses: the second one's scan fails, so the cursor must not move past what IT covered, or the
+    next tick would resume beyond blocks that address was never scanned for."""
+    cid, _ = _case(conn)
+    chain = ChainFake(latest=1_000, finalized=900)
+    chain.logs = [_lg(880, VICTIM, chain.h(880)), _lg(890, OTHER, chain.h(890))]
+    sub = _sub(conn, cid, start_block=850)
+    with db.tx(conn):
+        conn.execute("UPDATE monitoring_subscriptions SET addresses_json=? WHERE id=?", (db.dumps([VICTIM, OTHER]), sub["id"]))
+    real = chain.rpc
+
+    def second_addr_fails(calls, **kw):
+        out = real(calls, **kw)
+        for i, (m, p) in enumerate(calls):
+            if m == "eth_getLogs" and p[0]["topics"][1] == pad(OTHER):
+                kw["errors"].append("rpc: no response")
+                out[i] = None
+        return out
+    chain.rpc = second_addr_fails
+    out = monitor.tick(chain, conn, sub)
+    row = conn.execute("SELECT finalized_cursor, provisional_cursor FROM monitoring_subscriptions WHERE id=?", (sub["id"],)).fetchone()
+    assert out["error"] and row["finalized_cursor"] is None and row["provisional_cursor"] is None  # nothing covered for OTHER
+    assert conn.execute("SELECT COUNT(*) FROM evidence_items WHERE case_id=?", (cid,)).fetchone()[0] == 0
+    chain.rpc = real
+    out = monitor.tick(chain, conn, sub)
+    assert out["error"] is None and out["new_final"] == 2  # both addresses' transfers recorded once the scan completes
+
+
+def test_monitor_refuses_to_overwrite_a_cursor_another_worker_moved(conn):
+    cid, _ = _case(conn)
+    chain = ChainFake(latest=1_000, finalized=900)
+    sub = _sub(conn, cid, start_block=850)
+    real = chain.rpc
+
+    def other_worker_commits_during_scan(calls, **kw):  # a competing tick lands between our RPC and our write
+        with db.tx(conn):
+            conn.execute("UPDATE monitoring_subscriptions SET finalized_cursor=950, finalized_hash=? WHERE id=?", (chain.h(950), sub["id"]))
+        return real(calls, **kw)
+    chain.rpc = other_worker_commits_during_scan
+    out = monitor.tick(chain, conn, sub)
+    assert "changed under us" in (out["error"] or "")
+    row = conn.execute("SELECT finalized_cursor, last_error, state FROM monitoring_subscriptions WHERE id=?", (sub["id"],)).fetchone()
+    assert row["finalized_cursor"] == 950 and row["last_error"] is None and row["state"] == "active"  # the other worker's write stands
+
+
+def test_db_refuses_old_schema_version(tmp_path):
+    p = tmp_path / "old.db"
+    c = db.connect(p)
+    c.execute("PRAGMA user_version=1")
+    c.close()
+    with pytest.raises(db.DbError, match="schema version 1"):
+        db.connect(p)

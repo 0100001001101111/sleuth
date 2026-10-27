@@ -5,7 +5,7 @@ predicates therefore stay "unknown" unless a later rule ties an actor to the mov
 clean "no drain": internal native transfers and historical 7702 authorizations are not observable from ordinary RPC."""
 from ..client import ApiError, BudgetExceeded
 from ..onchain import TRANSFER, RpcError, block_at_time, erc20_meta, pad
-from .logs import addr_topic, data_uint, scan_topics
+from .logs import _hash32, addr_topic, data_uint, scan_topics
 from .types import Gap, Result, Span
 
 APPROVAL = "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"          # Approval(address,address,uint256)
@@ -72,13 +72,16 @@ def delegation(client, addr):
         return out
     if isinstance(blk, dict):
         try:
-            out["observed_block"], out["observed_block_hash"] = int(blk["number"], 16), blk.get("hash")
+            out["observed_block"], out["observed_block_hash"] = int(blk["number"], 16), _hash32(blk.get("hash"))
         except (KeyError, ValueError, TypeError):
             out["gaps"].append("malformed block header")
     if not isinstance(code, str):
         out["gaps"].append("eth_getCode failed: " + (errs[0] if errs else "no result"))
         return out
     code = code.lower()
+    if not code.startswith("0x") or len(code) % 2 or any(c not in "0123456789abcdef" for c in code[2:]):
+        out["gaps"].append("eth_getCode returned a malformed value; recorded as unknown")
+        return out
     if code.startswith(DELEGATION_PREFIX) and len(code) >= len(DELEGATION_PREFIX) + 40:
         out["delegated"] = True
         out["delegate_target"] = "0x" + code[len(DELEGATION_PREFIX):len(DELEGATION_PREFIX) + 40]
@@ -86,7 +89,7 @@ def delegation(client, addr):
         out["gaps"].append("delegation observed without a block anchor; recorded as unknown")
     else:
         out["delegated"] = False
-        out["code_kind"] = "eoa" if code in ("0x", "") else "contract"
+        out["code_kind"] = "eoa" if code == "0x" else "contract"
     return out
 
 
@@ -127,9 +130,9 @@ def drain_screen(client, victim, incident_ts=None, hours_before=1, hours_after=2
     out["events"] = ev.items
     out["coverage"] = ev.to_dict()["coverage"]
     out["gaps"].extend(f"{g.kind}: {g.detail}" + (f" [{g.span.start}-{g.span.end}]" if g.span else "") for g in ev.gaps)
-    complete = ev.coverage.complete and not any(g.kind == "unclassified" for g in ev.gaps)  # unclassified logs could be the drain
+    events_complete = ev.coverage.complete and not any(g.kind == "unclassified" for g in ev.gaps)  # unclassified logs could be the drain
     def tv(found):
-        return True if found else (False if complete else None)
+        return True if found else (False if events_complete else None)
     kinds = {e["event"] for e in ev.items}
     out["predicates"] = {
         "transfer_event_from_victim": tv("transfer_event_from_victim" in kinds),
@@ -156,5 +159,6 @@ def drain_screen(client, victim, incident_ts=None, hours_before=1, hours_after=2
         t["symbol"], t["decimals"] = (m or {}).get("symbol"), (m or {}).get("decimals")
     out["tokens"] = tokens
     out["gaps"].extend(f"{g.kind}: {g.detail}" for g in STRUCTURAL_GAPS)
-    out["complete"] = complete
+    # the run is complete only when every supported predicate is resolved: a failed delegation check leaves one unknown
+    out["complete"] = events_complete and out["delegation"]["delegated"] is not None
     return out
