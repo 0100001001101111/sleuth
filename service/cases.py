@@ -5,6 +5,7 @@ import hmac
 import re
 import secrets
 
+from sleuth.collectors.drain import RULE_VERSION as DRAIN_RULE
 from sleuth.collectors.money import RULE_VERSION as MONEY_RULE
 from sleuth.collectors.ring import RULE_VERSION as RING_RULE
 
@@ -12,6 +13,7 @@ from . import db, queue
 from .jobs import JOB_VERSION, MONEY_MAX_WALLETS
 
 ADDR = re.compile(r"^0x[0-9a-fA-F]{40}$")
+TXH = re.compile(r"^0x[0-9a-fA-F]{64}$")
 MONITOR_DAYS = 30
 MAX_OPEN_PER_SUBJECT = 3  # abuse brake: free screens of the same address are reused, not re-run
 MAX_CASES_PER_HOUR = 60   # service-wide brake: one host, one worker; beyond this the queue only grows
@@ -27,11 +29,18 @@ def valid_addr(a):
     return bool(a and ADDR.match(a.strip()))
 
 
+def valid_tx(h):
+    return bool(h and TXH.match(h.strip()))
+
+
 def create(conn, kind, chain_id, subject, email=None, incident_ts=None, claimed_loss=None, hours_after=None):
     """Create a case and its free screen run. Returns (case_id, access_token). The token is shown once; only its hash is stored."""
-    if kind not in ("rug", "drain"):
-        raise ValueError("kind must be rug or drain")
-    if not valid_addr(subject):
+    if kind not in ("rug", "drain", "tx"):
+        raise ValueError("kind must be rug, drain or tx")
+    if kind == "tx":
+        if not valid_tx(subject):
+            raise ValueError("subject must be a 0x transaction hash (64 hex characters)")
+    elif not valid_addr(subject):
         raise ValueError("subject must be a 0x address")
     subject = subject.strip().lower()
     token = secrets.token_urlsafe(24)
@@ -47,10 +56,15 @@ def create(conn, kind, chain_id, subject, email=None, incident_ts=None, claimed_
         conn.execute("INSERT INTO cases (id, created_at, kind, chain_id, subject, email, status, product, access_hash, incident_ts, claimed_loss)"
                      " VALUES (?,?,?,?,?,?,?,?,?,?,?)", (cid, db.now(), kind, int(chain_id), subject, (email or None), "open", "free_screen", _hash(token), incident_ts, claimed_loss))
         db.audit(conn, "web", "case_created", cid, {"kind": kind, "subject": subject})
-    payload = {"chain_id": int(chain_id), "token": subject} if kind == "rug" else {"chain_id": int(chain_id), "victim": subject, "incident_ts": incident_ts}
-    if kind == "drain" and hours_after is not None:
-        payload["hours_after"] = max(1, min(24, int(hours_after)))  # dropdown windows; the collector default is 24 h after an exact time
-    queue.enqueue(conn, cid, "rug_screen" if kind == "rug" else "drain_screen", payload, JOB_VERSION)
+    if kind == "rug":
+        payload, first = {"chain_id": int(chain_id), "token": subject}, "rug_screen"
+    elif kind == "tx":
+        payload, first = {"chain_id": int(chain_id), "tx": subject}, "tx_explain"
+    else:
+        payload, first = {"chain_id": int(chain_id), "victim": subject, "incident_ts": incident_ts}, "drain_screen"
+        if hours_after is not None:
+            payload["hours_after"] = max(1, min(24, int(hours_after)))  # dropdown windows; the collector default is 24 h after an exact time
+    queue.enqueue(conn, cid, first, payload, JOB_VERSION)
     return cid, token
 
 
@@ -100,10 +114,16 @@ def _put(conn, case_id, run_id, subject, predicate, obj, verdict, reason, rule):
 
 
 def follow_up_tx(conn, case_id, kind, result):
-    """Enqueue the free money trail once a rug screen has named wallets to follow. Runs INSIDE the parent run's
-    finish transaction (queue.finish's `after`), so the child exists iff the parent's terminal state committed.
-    Idempotent (the queue hashes the input). Priority within the cap: launcher, top sellers, then other tracked
-    wallets with their triage role; omitted candidates are listed in the payload for the case page."""
+    """Enqueue the free follow-up once a screen finished: the money trail after a rug screen that named wallets, the
+    multi-chain drain investigation after every drain screen (the screen only covers the incident window on one chain).
+    Runs INSIDE the parent run's finish transaction (queue.finish's `after`), so the child exists iff the parent's
+    terminal state committed. Idempotent (the queue hashes the input). Money-trail priority within the cap: launcher,
+    top sellers, then other tracked wallets with their triage role; omitted candidates are listed in the payload."""
+    if kind == "drain_screen":
+        case = conn.execute("SELECT chain_id, subject, incident_ts FROM cases WHERE id=?", (case_id,)).fetchone()
+        if not case:
+            return None
+        return queue.enqueue_tx(conn, case_id, "drain_investigation", {"chain_id": case["chain_id"], "victim": case["subject"], "incident_ts": case["incident_ts"]}, JOB_VERSION)
     if kind != "rug_screen":
         return None
     tri = result.get("triage") or {}
@@ -177,6 +197,25 @@ def record_result_tx(conn, case_id, run_id, kind, result):
                 val = tv[k]
                 _put(conn, case_id, run_id, result.get("token"), k, None, val if isinstance(val, bool) else None,
                      "services excluded; ownership unknown", "trace/group")
+    elif kind == "drain_investigation":
+        inv = result.get("investigation") if isinstance(result.get("investigation"), dict) else {}
+        chains = [c.get("chain_id") for c in inv.get("chains") or [] if isinstance(c, dict)]
+        complete = inv.get("complete") is True
+        for k, val in (inv.get("verdict") or {}).items():
+            _put(conn, case_id, run_id, result.get("victim"), k, ", ".join(f"chain {c}" for c in chains) or None,
+                 val if val is True or (val is False and complete) else None,  # the collector already withholds 'no' on partial reads; belt and braces
+                 "explorer pages + full transaction fetches on the busiest chains; mechanism per transaction; recipients profiled; "
+                 "ownership of recipients unknown" + ("" if complete else "; investigation incomplete"), inv.get("rule_version") or DRAIN_RULE)
+    elif kind == "tx_explain":
+        ex = result.get("explain") if isinstance(result.get("explain"), dict) else {}
+        if ex.get("found"):
+            # only accounts whose assets actually moved count; an account that merely signed an authorization is listed, not a loss
+            accts = [a for a in ex.get("accounts") or [] if isinstance(a, dict) and a.get("assets_left", bool(a.get("outflows")))]
+            _put(conn, case_id, run_id, result.get("tx"), "eip7702_authorization_in_tx", str(len(ex.get("authorizations") or [])),
+                 bool(ex.get("authorizations")), "type-4 authorization list of this transaction", ex.get("rule_version") or DRAIN_RULE)
+            _put(conn, case_id, run_id, result.get("tx"), "assets_left_accounts", ", ".join((a.get("account") or "")[:12] for a in accts) or None,
+                 bool(accts) if (accts or ex.get("complete")) else None, "token and native transfers decoded from the receipt" + ("" if ex.get("complete") else "; transfer list truncated"),
+                 ex.get("rule_version") or DRAIN_RULE)
     elif kind == "drain_screen":
         for name, val in (result.get("predicates") or {}).items():
             _put(conn, case_id, run_id, result.get("victim"), name, None, val, "event-named predicate over the incident window", "wallet/drain_screen")

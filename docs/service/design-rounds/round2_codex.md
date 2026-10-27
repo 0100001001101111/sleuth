@@ -8,7 +8,7 @@
 
 **VERIFIED —** SQLite WAL permits concurrent readers but only one writer, and all processes must use the same host. Long readers can delay checkpoints. A naïve copy of only the main database is not a reliable WAL backup because committed data may still be in the `-wal` file; use SQLite’s online backup API or a controlled checkpoint. [SQLite WAL documentation](https://www.sqlite.org/wal.html)
 
-**VERIFIED —** The current `Cache` is not the proposed service database: it does not enable WAL, has only `kv` and `cursor` tables, and its Python lock protects one `Cache` instance rather than coordinating web and worker processes. [client.py](/Users/owner/sleuth/sleuth/client.py:20)
+**VERIFIED —** The current `Cache` is not the proposed service database: it does not enable WAL, has only `kv` and `cursor` tables, and its Python lock protects one `Cache` instance rather than coordinating web and worker processes. [client.py](sleuth/client.py:20)
 
 **INFERRED —** Webhook/worker contention does not break SQLite if transactions remain short. RPC calls must occur outside transactions; each evidence chunk should then commit `evidence_items`, `coverage_checkpoints`, and the run lease atomically using `BEGIN IMMEDIATE`. A scan must never hold a transaction open while waiting on RPC or Blockscout.
 
@@ -24,7 +24,7 @@
 
 **VERIFIED —** Coinbase’s documented proxy flow verifies and settles payment before forwarding a request to the resource server. [Coinbase Bazaar payment flow](https://docs.cdp.coinbase.com/api-reference/v2/rest-api/x402-facilitator/bazaar-mcp-server)
 
-**VERIFIED —** Current Sleuth triage is not stateless: it reads and mutates `Watchlist`, writes pools, launch metadata, tracked roles, and `last_block`, then saves the global JSON file. [triage.py](/Users/owner/sleuth/sleuth/triage.py:115), [watchlist.py](/Users/owner/sleuth/sleuth/watchlist.py:17)
+**VERIFIED —** Current Sleuth triage is not stateless: it reads and mutates `Watchlist`, writes pools, launch metadata, tracked roles, and `last_block`, then saves the global JSON file. [triage.py](sleuth/triage.py:115), [watchlist.py](sleuth/watchlist.py:17)
 
 **INFERRED —** Therefore x402 should follow, not precede, separation of collection from persistence. The endpoint should:
 
@@ -69,7 +69,7 @@
 
 **VERIFIED — C6 resolved.** EIP-2612 requires a successful permit to emit `Approval`; Permit2 SignatureTransfer remains a gap.
 
-**VERIFIED — C7 conceded.** Block-span checkpoints are insufficient. `client.rpc()` accumulates completed batch results locally, but if a later `_rpc_once()` raises `BudgetExceeded`, the earlier results are lost to the caller. `tx_records_full()` processes and caches receipts only after the entire `client.rpc()` call returns. [client.py](/Users/owner/sleuth/sleuth/client.py:164), [onchain.py](/Users/owner/sleuth/sleuth/onchain.py:310)
+**VERIFIED — C7 conceded.** Block-span checkpoints are insufficient. `client.rpc()` accumulates completed batch results locally, but if a later `_rpc_once()` raises `BudgetExceeded`, the earlier results are lost to the caller. `tx_records_full()` processes and caches receipts only after the entire `client.rpc()` call returns. [client.py](sleuth/client.py:164), [onchain.py](sleuth/onchain.py:310)
 
 **INFERRED —** Receipt collection needs a deterministic hash-list checkpoint: persist each completed batch, return `completed_hashes`, `missing_hashes`, and `unattempted_hashes`, and resume from the first uncommitted batch. `devhistory` must set a wallet incomplete before collection and mark it complete only after all required stages finish.
 

@@ -6,6 +6,7 @@ import time
 from sleuth import devhistory, trace, triage
 from sleuth.client import ApiError, BudgetExceeded, Client
 from sleuth.collectors import COLLECTOR_VERSION
+from sleuth.collectors import drain as drain_inv
 from sleuth.collectors.launchcall import launch_calldata
 from sleuth.collectors.money import money_trail as _money_trail
 from sleuth.collectors.ring import coordinated_launch
@@ -17,6 +18,8 @@ SCREEN_BUDGET_S = 20.0
 DEEP_BUDGET_S = 240.0
 MONEY_BUDGET_S = 150.0   # explorer pages cost ~2-3 s each; 5 wallets x 6 pages plus hops
 MONEY_MAX_WALLETS = 5
+INVESTIGATE_BUDGET_S = 200.0   # presence on every configured chain, pages + concurrent tx fetches on two chains, 4 suspects; queue lease is 300 s
+TX_BUDGET_S = 20.0
 PROVIDER_ERRORS = (BudgetExceeded, ApiError, RpcError, OSError, ValueError, TypeError, KeyError)
 
 
@@ -106,6 +109,39 @@ def drain(client, victim, incident_ts=None, hours_after=24):
     return out
 
 
+def drain_investigation(client, victim, incident_ts=None):
+    """Free follow-up to the drain screen: how the assets left (mechanism per transaction), where they went (recipients
+    and submitters profiled), what else the same submitter hit, and whether the wallet is STILL delegated. Multi-chain:
+    every configured chain is checked for presence; the two busiest are read. See sleuth.collectors.drain."""
+    out = {"job": "drain_investigation", "job_version": JOB_VERSION, "victim": victim.lower(), "chain_id": client.chain_id,
+           "head": _head(client), "gaps": [], "complete": False, "checked_through": None}
+    try:
+        out["investigation"] = drain_inv.investigate(client, victim, incident_ts=incident_ts)
+    except PROVIDER_ERRORS as e:
+        out["gaps"].append(f"investigation failed: {type(e).__name__}: {str(e)[:160]}")
+        return out
+    out["gaps"] = [f"{g.get('kind')}: {g.get('detail')}" for g in out["investigation"].get("gaps") or []]
+    out["complete"] = bool(out["investigation"].get("complete"))
+    out["checked_through"] = (out["head"] or {}).get("block") if out["complete"] else None
+    return out
+
+
+def tx_explain(client, tx_hash):
+    """Single-transaction explainer (entry point for "I have a hash"): roles, EIP-7702 authorizations, transfers and the
+    mechanism for every account whose assets left in it."""
+    out = {"job": "tx_explain", "job_version": JOB_VERSION, "tx": tx_hash.lower(), "chain_id": client.chain_id,
+           "head": _head(client), "gaps": [], "complete": False, "checked_through": None}
+    try:
+        out["explain"] = drain_inv.explain_tx(client, tx_hash)
+    except PROVIDER_ERRORS as e:
+        out["gaps"].append(f"explain failed: {type(e).__name__}: {str(e)[:160]}")
+        return out
+    out["gaps"] = [f"{g.get('kind')}: {g.get('detail')}" for g in out["explain"].get("gaps") or []]
+    out["complete"] = bool(out["explain"].get("complete"))
+    out["checked_through"] = (out["head"] or {}).get("block") if out["complete"] else None
+    return out
+
+
 def money_trail(client, token, wallets=()):
     """Free follow-up to the screen: follow sale proceeds from the launcher and top sellers hop by hop (see
     sleuth.collectors.money). High-volume wallets (bots, hot wallets) are listed but not followed."""
@@ -127,7 +163,8 @@ def money_trail(client, token, wallets=()):
 
 
 JOBS = {"rug_screen": (rug_screen, SCREEN_BUDGET_S), "rug_deep": (rug_deep, DEEP_BUDGET_S), "drain_screen": (drain, SCREEN_BUDGET_S),
-        "money_trail": (money_trail, MONEY_BUDGET_S)}
+        "money_trail": (money_trail, MONEY_BUDGET_S), "drain_investigation": (drain_investigation, INVESTIGATE_BUDGET_S),
+        "tx_explain": (tx_explain, TX_BUDGET_S)}
 
 
 def run_job(cfg, kind, payload, budget_s=None):
@@ -143,6 +180,10 @@ def run_job(cfg, kind, payload, budget_s=None):
             res = fn(client, payload["token"], tracked=payload.get("tracked") or ())
         elif kind == "money_trail":
             res = fn(client, payload["token"], wallets=payload.get("wallets") or ())
+        elif kind == "drain_investigation":
+            res = fn(client, payload["victim"], incident_ts=payload.get("incident_ts"))
+        elif kind == "tx_explain":
+            res = fn(client, payload["tx"])
         else:
             res = fn(client, payload["victim"], incident_ts=payload.get("incident_ts"), hours_after=int(payload.get("hours_after") or 24))
         res["requests"] = getattr(client, "requests", None)

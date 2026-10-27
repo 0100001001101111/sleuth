@@ -23,8 +23,8 @@
 <div class="panel-body"><p>Paste the token address. We identify the launch, decode the launchpad call including snipe-tax exemption lists, test the first blocks for concentrated early buying, and measure whether tracked wallets sold in the last 30 minutes. Then we follow the money: which disposals were actually paid, what was parked in a contract for nothing, and where the proceeds went, hop by hop, until a bridge, an exchange or a wallet that still holds.</p>
 <p style="margin-top:20px"><a class="btn primary" href="/screen">Run a rug screen</a></p></div></div>
 <div class="panel"><div class="panel-head"><span><span class="n">03 /</span>My wallet was drained</span><span class="r"><span class="tag warn">beta</span></span></div>
-<div class="panel-body"><p>Paste your wallet address and roughly when it happened. We list every token and NFT transfer out, every approval you granted, and whether the account currently delegates to a contract (EIP-7702). We never need your keys.</p>
-<p style="margin-top:20px"><a class="btn" href="/drain">Run a drain screen</a></p></div></div>
+<div class="panel-body"><p>Paste your wallet address and roughly when it happened. The event screen lists every transfer out and approval in the window. The investigation then fetches each outflow transaction and names how the funds left: an EIP-7702 delegation someone else submitted, an allowance or permit, or the key itself. It profiles the recipients, counts the other wallets the same submitter hit, and checks Ethereum, Base, Arbitrum and Robinhood Chain for the same address. It also says whether the account is <em>still</em> delegated, which revoking approvals does not fix. We never need your keys.</p>
+<p style="margin-top:20px"><a class="btn" href="/drain">Run a drain investigation</a> <a class="btn" href="/tx" style="margin-left:8px">I have a transaction hash</a></p></div></div>
 </div>
 
 <div class="panel"><div class="panel-head"><span><span class="n">04 /</span>Founding case</span><span class="r">$29 · USDC on Base</span></div>

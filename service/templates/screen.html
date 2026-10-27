@@ -1,21 +1,23 @@
-{% extends "base.html" %}{% block title %}{{ 'Rug screen' if kind=='rug' else 'Wallet drain screen (beta)' }} · Sleuth{% endblock %}{% block body %}
-<div class="label">Free screen{% if kind=='drain' %} · beta{% endif %}</div>
-<h1 class="display">{{ 'Rug' if kind=='rug' else 'Drain' }} <em>screen.</em></h1>
-<p class="lead">{{ 'Launch facts, early-buy concentration and recent selling for one token.' if kind=='rug' else 'Transfers out, approvals and current delegation for one wallet, from events only.' }}</p>
+{% extends "base.html" %}{% block title %}{{ {'rug': 'Rug screen', 'drain': 'Wallet drain investigation (beta)', 'tx': 'Transaction explainer (beta)'}[kind] }} · Sleuth{% endblock %}{% block body %}
+<div class="label">Free screen{% if kind!='rug' %} · beta{% endif %}</div>
+<h1 class="display">{{ {'rug': 'Rug', 'drain': 'Drain', 'tx': 'Transaction'}[kind] }} <em>{{ 'explainer.' if kind=='tx' else 'screen.' }}</em></h1>
+<p class="lead">{{ {'rug': 'Launch facts, early-buy concentration and recent selling for one token.', 'drain': 'How the funds left, where they went, who else was hit, and whether the account is still delegated. Ethereum, Base, Arbitrum and Robinhood Chain are checked.', 'tx': 'One transaction, explained: who submitted it, who signed an EIP-7702 authorization, what moved and by which mechanism.'}[kind] }}</p>
 {% if error %}<div class="note bad">{{ error }}</div>{% endif %}
-{% if kind=='drain' %}<div class="note">This screen reads events only. It can show transfers out, approvals and delegation; it cannot tell you <em>why</em> they happened, whether your key was compromised, or whether an approval was the cause. Those stay "unknown". It will never report a wallet as clean.</div>{% endif %}
+{% if kind=='drain' %}<div class="note">Two passes. The event screen lists transfers out, approvals and delegation in the window you give. The investigation then fetches each outflow transaction and names the mechanism: a delegation someone else submitted, an allowance or permit, or the key itself. Whether a signature was obtained by a misleading prompt or a copied key is not on the chain and stays "unknown". Nothing here ever reports a wallet as clean.</div>{% endif %}
+{% if kind=='tx' %}<div class="note">Paste the hash of the transaction that took the funds. If it is a type-4 (EIP-7702) transaction, the page names which account signed the delegation and which address submitted it. One transaction shows the mechanism, not the cause.</div>{% endif %}
 <div class="cols">
 <form method="post" action="/screen" class="panel"><div class="panel-head"><span><span class="n">01 /</span>Input</span><span class="r">Chain {{ chain_id }}</span></div>
 <div class="panel-body"><input type="hidden" name="kind" value="{{ kind }}">
-<label style="margin-top:0">{{ 'Token contract address' if kind=='rug' else 'Your wallet address' }}</label><input name="subject" class="m" required pattern="0x[0-9a-fA-F]{40}" placeholder="0x…" autocomplete="off" spellcheck="false">
+{% if kind=='tx' %}<label style="margin-top:0">Transaction hash</label><input name="subject" class="m" required pattern="0x[0-9a-fA-F]{64}" placeholder="0x… (66 characters)" autocomplete="off" spellcheck="false">
+{% else %}<label style="margin-top:0">{{ 'Token contract address' if kind=='rug' else 'Your wallet address' }}</label><input name="subject" class="m" required pattern="0x[0-9a-fA-F]{40}" placeholder="0x…" autocomplete="off" spellcheck="false">{% endif %}
 {% if kind=='drain' %}<label>When did it happen? <span class="hint">pick one</span></label><select name="when"><option value="">I'm not sure · checks the most recent hour only</option><option value="6">In the last 6 hours</option><option value="24">In the last 24 hours</option><option value="exact">I know the time · enter it below</option></select>
 <label>Exact date and time, if you know it <span class="hint">optional · Pacific time · we check 1 h before to 24 h after</span></label><input name="incident_local" type="datetime-local">
 <label>Approximate loss <span class="hint">optional, free text</span></label><input name="claimed_loss" maxlength="100">{% endif %}
 <label>Email <span class="hint">optional · only for your private link and monitoring alerts</span></label><input name="email" type="email" autocomplete="email">
-<p style="margin:26px 0 0"><button class="btn primary" type="submit">Run free screen</button></p>
+<p style="margin:26px 0 0"><button class="btn primary" type="submit">{{ 'Explain this transaction' if kind=='tx' else 'Run free screen' }}</button></p>
 </div></form>
 <div class="stack">
-<div class="panel"><div class="panel-head"><span><span class="n">02 /</span>What happens next</span></div><div class="panel-body"><p>About 20 seconds of chain reads. You land on a private results page; the link is the only key to it, so save it.</p></div></div>
+<div class="panel"><div class="panel-head"><span><span class="n">02 /</span>What happens next</span></div><div class="panel-body"><p>{% if kind=='drain' %}About 20 seconds for the event screen, then up to three minutes for the investigation; the page refreshes itself.{% else %}About 20 seconds of chain reads.{% endif %} You land on a private results page; the link is the only key to it, so save it.</p></div></div>
 <div class="panel"><div class="panel-head"><span><span class="n">03 /</span>What we never ask for</span></div><div class="panel-body"><p>No seed phrase, no private key, no wallet connection, no transaction from your wallet. Anyone who asks for those is not us.</p></div></div>
 </div></div>
 {% endblock %}

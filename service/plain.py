@@ -3,6 +3,7 @@ module only translates predicate keys into questions a victim can read, verdicts
 into sentences, and the recorded verdicts into a short summary. Nothing here reads the chain or adds a claim that
 is not already in the assertions."""
 import time
+from datetime import UTC, datetime
 
 # predicate -> (question, {verdict word: meaning}); None key = unknown. Keep every sentence true for the rule as built.
 QUESTIONS = {
@@ -10,8 +11,8 @@ QUESTIONS = {
         "YES": "At least one token transfer out of this wallet was recorded in the window; the events are listed below.",
         "no": "No ERC-20 or ERC-721 Transfer event out of this wallet was recorded in the window checked. ERC-1155 transfers and native-coin moves are not read by this screen.",
         None: "The window could not be read completely, so this cannot be answered."}),
-    "approval_event_owner_victim": ("Did this wallet sign a token approval in the window?", {
-        "YES": "An Approval event from this wallet was recorded. It can be a new allowance or a revocation (set to zero); the amounts are in the events below. An open allowance lets the spender move those tokens later without the key.",
+    "approval_event_owner_victim": ("Was a token approval recorded for this wallet in the window?", {
+        "YES": "An Approval event naming this wallet as owner was recorded. It can be a new allowance or a revocation (set to zero); the amounts are in the events below. An open allowance lets the spender move those tokens later without the key.",
         "no": "No Approval event from this wallet was recorded in the window checked.",
         None: "The window could not be read completely, so this cannot be answered."}),
     "approval_for_all_event": ("Did this wallet sign a whole-collection NFT approval?", {
@@ -26,6 +27,60 @@ QUESTIONS = {
     "key_compromised": ("Was the private key stolen?", {None: "Cannot be told from events: a transfer out looks the same whether the key, an approval or a delegation moved it."}),
     "spender_used_allowance": ("Did an approved spender take the funds?", {None: "Cannot be told from events: that needs the caller of the transfer, which logs do not record."}),
     "delegate_caused_transfer": ("Did the delegated contract move the funds?", {None: "Cannot be told: the delegation seen now may have been set after the loss."}),
+    # drain investigation (sleuth.collectors.drain): mechanism per transaction, destinations, current delegation
+    "assets_left_wallet": ("Did any asset leave this wallet?", {
+        "YES": "At least one token or native-coin transfer out of this wallet was found in the pages read.",
+        "no": "No transfer out of this wallet was found, and the explorer pages for every chain checked were read completely.",
+        None: "The wallet's history could not be read completely on every chain, so this cannot be answered."}),
+    "eip7702_authorization_by_wallet_submitted_by_other": ("Did someone else submit a transaction carrying this wallet's EIP-7702 authorization, and did assets leave in it?", {
+        "YES": "Yes. A type-4 transaction paid for by another address carried an authorization signed by this wallet's key, delegating the wallet to a contract, and assets left the wallet inside that same transaction. This is how most 2025-26 drains work: one signature hands the whole account to code.",
+        "no": "No loss transaction carried an authorization from this wallet; every outflow transaction was fetched and read.",
+        None: "Not every outflow transaction could be fetched, so this cannot be answered."}),
+    "allowance_or_permit_used_by_third_party": ("Did a third party spend an allowance or permit signature from this wallet?", {
+        "YES": "Yes. A transaction paid for by another address moved this wallet's tokens through an existing allowance or a signed permit (Permit / Permit2).",
+        "no": "No outflow used an allowance or permit; every outflow transaction was fetched and read.",
+        None: "Not every outflow transaction could be fetched, so this cannot be answered."}),
+    "wallet_key_signed_outflow": ("Did this wallet's own key sign a transaction that sent assets out?", {
+        "YES": "Yes. At least one outflow was a transaction signed by this wallet's key. Who held the key at that moment is not something the chain records; a sweeper with the key and the owner look the same.",
+        "no": "No outflow was signed by this wallet's key; every outflow transaction was fetched and read.",
+        None: "Not every outflow transaction could be fetched, so this cannot be answered."}),
+    "third_party_tx_unresolved": ("Did assets leave in a third-party transaction whose mechanism could not be identified?", {
+        "YES": "Yes. Assets left in a transaction paid for by someone else that carried no authorization, allowance or permit this collector recognises; the raw transaction is in the details.",
+        "no": "Every third-party outflow was explained by an authorization, allowance or permit.",
+        None: "Not every outflow transaction could be fetched, so this cannot be answered."}),
+    "sweep_followed_inbound_credit": ("Was a sweep made within minutes of money arriving?", {
+        "YES": "Yes. At least one loss transaction followed an inbound credit within two minutes. That timing is consistent with an automated watcher on the account; it can also be coincidence, so it is a lead, not a finding.",
+        "no": "No loss transaction followed an inbound credit closely.",
+        None: "Not every outflow transaction could be fetched, so this cannot be answered."}),
+    "activity_on_other_chains": ("Is this wallet active on more than one of the chains checked?", {
+        "YES": "Yes. The same address has history on more than one chain; the case chain and the busiest other chain were read. A key that signs on one chain signs on all of them.",
+        "no": "Only one of the configured chains knows this address.",
+        None: "One or more chains could not be queried, so this cannot be answered."}),
+    "wallet_currently_delegated": ("Is this wallet delegated to a contract right now?", {
+        "YES": "Yes. When checked, the account's code pointed at a contract (EIP-7702). Revoking token approvals does not undo this: the delegate can still move anything the key could. The delegate's identity and the time of the check are shown in the investigation; a verified wallet-vendor account is normal, an unverified contract set in a loss transaction is the open door.",
+        "no": "No delegation was set on the account on any configured chain when checked.",
+        None: "The account record could not be read on every chain, so this cannot be answered."}),
+    "other_wallets_authorized_to_same_submitter": ("Did the same submitter carry authorizations from other wallets?", {
+        "YES": "Yes. The address that submitted the loss transaction also submitted type-4 transactions carrying other accounts' authorizations. Whether anything moved from those accounts was not checked here; who runs the submitter is unknown.",
+        "no": "In the transactions read, the submitter carried no other account's authorization.",
+        None: "The submitter's history could not be read completely, so this cannot be answered."}),
+    "recipient_still_holds_swept_asset": ("Does a recipient still hold what was taken?", {
+        "YES": "Yes. At least one recipient's balance still contained an asset that left this wallet when read. A balance is a fact about that moment, not a promise it stays.",
+        "no": "No recipient held any of this wallet's swept assets when read.",
+        None: "Recipient balances could not be read completely, so this cannot be answered."}),
+    "recipient_sent_to_exchange_bridge_or_privacy_pool": ("Did a recipient send funds on to an exchange, a bridge or a privacy pool?", {
+        "YES": "Yes. After the first loss, at least one recipient sent value to an address the explorer labels as an exchange, bridge or privacy pool. After that point the chain cannot say who received it; an exchange can, with a lawful request.",
+        "no": "In the pages read, no recipient sent to a labelled exchange, bridge or privacy pool after the loss. Unlabelled destinations are listed in the investigation.",
+        None: "Recipient histories could not be read completely, so this cannot be answered."}),
+    # single-transaction explainer
+    "eip7702_authorization_in_tx": ("Does this transaction carry an EIP-7702 authorization?", {
+        "YES": "Yes. It is a type-4 transaction: the listed account(s) signed a delegation and the sender submitted it. Any transfer out of those accounts in the same transaction was made by the delegate code.",
+        "no": "No. It carries no authorization list; whatever moved, moved by a call, an allowance or a permit.",
+        None: "The transaction could not be read."}),
+    "assets_left_accounts": ("Did assets leave any account in this transaction?", {
+        "YES": "Yes. The accounts whose tokens or native coin left are listed with the mechanism for each.",
+        "no": "No token or native transfer out of any account was decoded from this transaction.",
+        None: "The transfer list was cut short, so this cannot be answered."}),
     "dev_sold_in_window": ("Did the launcher sell in the first 30 minutes?", {
         "YES": "The launcher's wallet sold into a venue within the first 30 minutes after launch.",
         "no": "No sale by the launcher's wallet was recorded in the first 30 minutes (transfer logs complete).",
@@ -90,6 +145,8 @@ GAPS = [  # (prefix of the gap code or text, sentence)
     ("cycle", "A wallet already visited was reached again and not re-followed."),
     ("malformed", "An explorer row was unreadable and was skipped."),
     ("label", "A wallet's label lookup failed; it is shown without one."),
+    ("capped", "More chains or addresses were involved than the limit; the case chain and then the busiest were read, the rest are named."),
+    ("not_found", "The explorer does not know this transaction on this chain."),
 ]
 
 
@@ -121,12 +178,113 @@ def gap_text(gap):
     return raw, raw
 
 
-def summary(case, result, assertions):
+def _when(ts):
+    """' (2026-10-27 05:12 UTC)' for an epoch observed_at, or '' when unknown: evidence is dated, never 'now'."""
+    try:
+        return f" ({datetime.fromtimestamp(float(ts), tz=UTC).strftime('%Y-%m-%d %H:%M UTC')})" if ts else ""
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+
+
+def _investigation_words(v, inv):
+    """Plain sentences for the drain investigation: how it left, where it went, and the standing risk."""
+    out = []
+    chains = [c for c in inv.get("chains") or [] if isinstance(c, dict)]
+    names = ", ".join(str(c.get("name") or c.get("chain_id")) for c in chains)
+    if not chains:
+        out.append("The follow-up investigation could not read any chain, so how the funds left is unknown.")
+        return out
+    out.append(f"The follow-up read this wallet's history on {names}.")
+    how = v.get("eip7702_authorization_by_wallet_submitted_by_other")
+    if how == "YES":
+        out.append("How the funds left: one signature from this wallet's key handed the account to a contract (an EIP-7702 delegation), and another address submitted that transaction and swept the assets in the same block. The key signed that authorization; whether through a wallet prompt that looked routine or because the key itself was copied, the chain does not say.")
+    elif v.get("allowance_or_permit_used_by_third_party") == "YES":
+        out.append("How the funds left: a third party spent a token allowance or a permit signature from this wallet.")
+    elif v.get("wallet_key_signed_outflow") == "YES":
+        out.append("How the funds left: transactions signed by this wallet's own key. The chain cannot tell whether the owner or someone holding the key signed them.")
+    elif v.get("third_party_tx_unresolved") == "YES":
+        out.append("Assets left in a transaction someone else paid for, by a mechanism this collector does not recognise; the raw transaction is in the details.")
+    elif how == "no" and v.get("assets_left_wallet") == "no":
+        out.append("No transfer out of this wallet was found on the chains read.")
+    else:
+        out.append("How the funds left could not be settled: not every outflow transaction could be fetched.")
+    tied_self = any(r.get("tied_to_loss") for c in chains for r in (c.get("losses") or []) if isinstance(r, dict))
+    if tied_self and how == "YES":
+        out.append("A transaction signed by the wallet's own key is also tied to the loss (same recipient or same minutes), which points to the key being usable by the sweeper, not only a signed prompt.")
+    where = v.get("recipient_sent_to_exchange_bridge_or_privacy_pool")
+    if v.get("recipient_still_holds_swept_asset") == "YES":
+        out.append("Where it went: at least one recipient still held part of what was taken when read.")
+    if where == "YES":
+        out.append("At least one recipient sent value on to an exchange, bridge or privacy pool; the names are in the investigation panel. Past that point only the venue can say who received it.")
+    elif where == "no":
+        out.append("In the pages read, no recipient sent to a labelled exchange, bridge or privacy pool.")
+    if v.get("other_wallets_authorized_to_same_submitter") == "YES":
+        out.append("The same submitter address carried authorizations from other wallets too; whether their assets moved was not checked.")
+    # the delegation check covers every chain the explorer knows the address on, including chains too quiet to be read
+    # Every live delegation is named with its chain: a wallet swept on two chains is usually still delegated on both,
+    # and the one installed by the sweep is the open door whatever its name.
+    names_by = {cid: (p or {}).get("name") or f"chain {cid}" for cid, p in (inv.get("presence") or {}).items()}
+    deles = inv.get("delegations") or {str(c.get("chain_id")): c.get("current_delegation") or {} for c in chains}
+    live = [(cid, d) for cid, d in deles.items() if isinstance(d, dict) and d.get("delegated")]
+    for cid, d in live:
+        who = d.get("label") or ("a verified contract" if d.get("verified") else "an unverified contract" if d.get("verified") is False
+                                 else "a contract whose verification could not be read")
+        s = (f"On {names_by.get(cid, f'chain {cid}')} this wallet was STILL delegated to {who} ({(d.get('delegate') or '')[:12]}…) "
+             f"when checked{_when(inv.get('observed_at'))}.")
+        if d.get("set_in_loss_tx"):
+            s += (f" That delegation was set in loss transaction {d['set_in_loss_tx'][:12]}… submitted by {(d.get('set_by') or '?')[:12]}…: "
+                  "whatever its name, it is the open door.")
+        elif d.get("verified") and d.get("label"):
+            s += " A verified source and a tidy name do not make it safe: drainer kits verify their delegates too. If you did not set it yourself, it is the open door."
+        else:
+            s += " An unverified delegate is the open door."
+        out.append(s)
+    if live:
+        out.append("Revoking token approvals does nothing about a delegation. Move what is left to a fresh key, and clear the delegation "
+                   "from a wallet that shows type-4 authorizations.")
+    elif v.get("wallet_currently_delegated") == "no":
+        out.append(f"No delegation was set on the account when checked{_when(inv.get('observed_at'))}. What could still let a sweeper in is an open token allowance or the key itself; the drain screen lists approval events in its window, which is not a check of current allowances.")
+    earlier = sum(len(c.get("earlier_third_party") or []) for c in chains)
+    if earlier:
+        out.append(f"{earlier} third-party move(s) happened more than an hour before the time you gave; they are listed with their own total "
+                   "and not counted as this loss. If the loss began earlier, run the screen again with an earlier time.")
+    excused = sum(len(c.get("third_party_self_authorised") or []) for c in chains)
+    if excused:
+        out.append(f"{excused} third-party move(s) followed this wallet's own exact-amount approval minutes earlier, the shape of a swap or "
+                   "bridge the wallet ordered; they are listed but not counted as loss.")
+    if inv.get("quarantine_total"):
+        out.append(f"{inv['quarantine_total']} row(s) were set aside as look-alike or impersonating tokens and addresses (address poisoning); they are listed separately and never counted as loss.")
+    return out
+
+
+def summary(case, result, assertions, investigation=None):
     """Sentences for the 'In plain words' panel, derived only from recorded verdicts and the latest result."""
     try:
         v = {a["predicate"]: a["verdict"] for a in assertions}
         res = result if isinstance(result, dict) else {}
         out = []
+        if case["kind"] == "tx":
+            ex = res.get("explain") if isinstance(res.get("explain"), dict) else {}
+            if not ex:
+                return ["The transaction has not been read yet."]
+            if not ex.get("found"):
+                kinds = {g.get("kind") for g in ex.get("gaps") or [] if isinstance(g, dict)}
+                if "provider" in kinds:
+                    return ["The explorer failed to answer for this hash, so nothing is known yet; the run can be repeated."]
+                return ["The explorer does not know this transaction hash on this chain. Check the chain and the hash."]
+            accts = [a for a in ex.get("accounts") or [] if isinstance(a, dict)]
+            if ex.get("authorizations"):
+                out.append(f"This is a type-4 transaction: it carries {len(ex['authorizations'])} EIP-7702 authorization(s). The submitter paid for it; the account(s) that signed the authorization handed their code to a contract.")
+            moved = [a for a in accts if a.get("assets_left", bool(a.get("outflows")))]
+            for a in moved:
+                out.append(f"Assets left {(a.get('account') or '')[:12]}… by: {str(a.get('mechanism') or 'unknown').replace('_', ' ')}. {a.get('evidence') or ''}")
+            for a in accts:
+                if a not in moved:
+                    out.append(f"{(a.get('account') or '')[:12]}… signed an authorization carried by this transaction but none of its assets moved here; its other transactions may tell a different story.")
+            if not moved:
+                out.append("No account lost assets in this transaction as far as the decoded transfers show.")
+            out.append("One transaction shows the mechanism, not the cause: it cannot say who held the key or what the signer was shown. Run the drain screen on the affected wallet for the full picture.")
+            return out
         if case["kind"] == "drain":
             win, inp = res.get("window") or {}, res.get("input") or {}
             span = f" (blocks {win.get('start')} to {win.get('end')})" if win.get("start") is not None else ""
@@ -143,20 +301,25 @@ def summary(case, result, assertions):
                 else:
                     out.append(f"We checked from 1 hour before to 24 hours after the time you gave{span}.")
             n = len(res.get("events") or [])
-            if win.get("start") is None:
-                return out
-            out.append({"YES": f"Tokens did leave this wallet in that window ({n} event(s) listed below).",
-                        "no": "No token transfer out of this wallet was recorded in that window."}.get(v.get("transfer_event_from_victim"), "Whether tokens left the wallet could not be fully checked."))
-            if v.get("approval_event_owner_victim") == "YES":
-                out.append("An approval event was signed by this wallet in the window; it can be a new allowance or a revocation (see the events below). An open allowance lets a spender move tokens later without the key.")
-            elif v.get("approval_event_owner_victim") == "no":
-                out.append("No approval event from this wallet was recorded in that window.")
-            target = (res.get("delegation") or {}).get("delegate_target")
-            if v.get("delegation_observed_at_block") == "YES":
-                out.append(f"When checked (block {win.get('end')}), the wallet was delegated to contract {target or '(unknown target)'} (EIP-7702). A delegated contract can act as the wallet; this alone does not show it caused the loss, and it may have changed since.")
-            elif v.get("delegation_observed_at_block") == "no":
-                out.append(f"No contract delegation was set on the wallet when checked (block {win.get('end')}).")
-            out.append("Why the funds moved cannot be told from events: that needs the transaction's calldata or a trace, which this free screen does not read.")
+            if win.get("start") is not None:      # the event screen may have failed while the investigation succeeded
+                out.append({"YES": f"Tokens did leave this wallet in that window ({n} event(s) listed below).",
+                            "no": "No token transfer out of this wallet was recorded in that window."}.get(v.get("transfer_event_from_victim"), "Whether tokens left the wallet could not be fully checked."))
+                if v.get("approval_event_owner_victim") == "YES":
+                    out.append("An approval event was signed by this wallet in the window; it can be a new allowance or a revocation (see the events below). An open allowance lets a spender move tokens later without the key.")
+                elif v.get("approval_event_owner_victim") == "no":
+                    out.append("No approval event from this wallet was recorded in that window.")
+                target = (res.get("delegation") or {}).get("delegate_target")
+                if v.get("delegation_observed_at_block") == "YES":
+                    out.append(f"When checked (block {win.get('end')}), the wallet was delegated to contract {target or '(unknown target)'} (EIP-7702). A delegated contract can act as the wallet; this alone does not show it caused the loss, and it may have changed since.")
+                elif v.get("delegation_observed_at_block") == "no":
+                    out.append(f"No contract delegation was set on the wallet when checked (block {win.get('end')}).")
+            inv = (investigation or {}).get("investigation") if isinstance(investigation, dict) else None
+            if isinstance(inv, dict):
+                out.extend(_investigation_words(v, inv))
+            elif win.get("start") is None:
+                return out                                  # nothing was read and nothing followed: say so and stop
+            else:
+                out.append("Why the funds moved cannot be told from events alone. The follow-up investigation runs next: it fetches each outflow transaction, names the mechanism (delegation, allowance, permit or the key itself), profiles the recipients and checks whether the wallet is still delegated.")
             if res and inp.get("incident_ts") is None:
                 out.append("If you know roughly when it happened, run the screen again with the time: the right window matters more than anything else.")
         else:

@@ -4,8 +4,8 @@
 
 | DONE (branch `feat/incident-service`, 2026-10-26) | NEXT (before any customer) | LATER |
 |---|---|---|
-| Collectors package returning partial results (`sleuth/collectors/`) | Replayability refactor of `triage`/`devhistory`/`trace` as libraries (no watchlist write, partial receipt returns) | Paginated native / internal history (drain), historical EIP-7702 index, paid drain case |
-| Free token-rug screen, free drain event screen (beta) | Receipt collector with hash-list checkpoints; write `coverage_checkpoints` | $9/month extension; human-reviewed tier (after B-3) |
+| Collectors package returning partial results (`sleuth/collectors/`); drain investigation (`sleuth/collectors/drain.py`, 2026-10-27): multi-chain, current 7702 delegation per chain shown in red with its origin ("set in loss transaction X by Y") and "revoking approvals does not undo it", poisoning quarantine, self-authorised third-party moves set aside, per-tx mechanism, suspect profiles with exchange / bridge / privacy-pool outbound; `/tx` explainer | Replayability refactor of `triage`/`devhistory`/`trace` as libraries (no watchlist write, partial receipt returns) | Full native / internal history (drain), historical EIP-7702 index, paid drain case, historical delegation timeline (when did the type-4 land) |
+| Free token-rug screen, free drain event screen + drain investigation follow-up (beta), transaction explainer (beta) | Receipt collector with hash-list checkpoints; write `coverage_checkpoints` | $9/month extension; human-reviewed tier (after B-3) |
 | $29 pilot case: deep pass, workspace, export, 30-day Transfer monitoring | Capability-token cookie exchange; emailed link re-issue; email provider for alerts | Postgres on trigger; retention job (B-8) |
 | SQLite WAL core, lease queue, two-cursor monitoring with reorg rollback, outbox with file sender | Structured coverage fields on every result (start, finality, provider, missing spans) and in the manifest | Chainabuse partner API, exchange drafting, authorization workflow |
 | Manual USDC order with operator attestation; x402-style gate with mock facilitator behind a flag | Real facilitator + protocol-compatible wire shape (B-4); RPC check of attested Base tx; checkout provider adapter | Launchpad / B2B partnerships, Permit2, NFTs, cross-chain evidence |
@@ -35,8 +35,8 @@ remaining sequence:
    shape (CAIP-2 network, `PAYMENT-RESPONSE`), requirement binding (amount/recipient/asset/network) — all gated on B-4.
 6. **Ops** — launchd jobs for staging, backup script using `service.db.backup`, `docs/service/06` runbook updates,
    schema migration helper.
-7. **Later phases** — Chainabuse partner API behind authorization records, paginated native/internal collection, 7702
-   history, Permit2, NFTs, Postgres migration, partnerships.
+7. **Later phases** — Chainabuse partner API behind authorization records, full native/internal collection, 7702
+   history (the type-4 tx that installed the delegation; today only the CURRENT delegate is read), Permit2, NFTs, Postgres migration, partnerships.
 
 ## External dependencies (none configured in this phase)
 

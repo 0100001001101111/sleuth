@@ -18,49 +18,49 @@
 
 | Status | Component | Verdict |
 |---|---|---|
-| VERIFIED | `flows.trades`, `flows.aggregate` | Reuse essentially as-is. They are pure deterministic transforms with per-transaction netting, routed-flow reachability, mint handling, and cautious burn attribution. [flows.py](/Users/owner/sleuth/sleuth/flows.py:88) |
-| VERIFIED | `flows.detect_pools` | Reuse as a versioned heuristic, not as ground truth. It cleanly separates one-way sinks and optional swap evidence, but two-way flow remains heuristic. [flows.py](/Users/owner/sleuth/sleuth/flows.py:26) |
-| VERIFIED | `labels.classify` | Reuse as a policy function if its inputs and rule version are recorded. It correctly separates service addresses from ownership evidence. [labels.py](/Users/owner/sleuth/sleuth/labels.py:5) |
-| VERIFIED | Log normalization and splitting | Reuse the algorithm, not the present API. It recursively splits on the 10M-block limit and 10,000-log cap and refuses silent truncation. [onchain.py](/Users/owner/sleuth/sleuth/onchain.py:29) |
-| VERIFIED | Receipt-level token extraction | Reuse after generalizing beyond a single ERC-20. Receipt caching and topic-emitter collection are useful primitives. [onchain.py](/Users/owner/sleuth/sleuth/onchain.py:310) |
-| VERIFIED | Block-time lookup | Reuse with explicit provenance. It validates returned block height before caching timestamps. [onchain.py](/Users/owner/sleuth/sleuth/onchain.py:153) |
-| VERIFIED | Three-valued verdict rules | Reuse. Triage, trace, and dev-history generally preserve `true / false / unknown` rather than converting incomplete evidence into a negative. [triage.py](/Users/owner/sleuth/sleuth/triage.py:69), [devhistory.py](/Users/owner/sleuth/sleuth/devhistory.py:26), [trace.py](/Users/owner/sleuth/sleuth/trace.py:253) |
-| VERIFIED | Launch-event collector | Reuse as chain-specific plugin logic. It records whether a launcher came from a launch event or only a candidate creation signer. [launch.py](/Users/owner/sleuth/sleuth/launch.py:12) |
+| VERIFIED | `flows.trades`, `flows.aggregate` | Reuse essentially as-is. They are pure deterministic transforms with per-transaction netting, routed-flow reachability, mint handling, and cautious burn attribution. [flows.py](sleuth/flows.py:88) |
+| VERIFIED | `flows.detect_pools` | Reuse as a versioned heuristic, not as ground truth. It cleanly separates one-way sinks and optional swap evidence, but two-way flow remains heuristic. [flows.py](sleuth/flows.py:26) |
+| VERIFIED | `labels.classify` | Reuse as a policy function if its inputs and rule version are recorded. It correctly separates service addresses from ownership evidence. [labels.py](sleuth/labels.py:5) |
+| VERIFIED | Log normalization and splitting | Reuse the algorithm, not the present API. It recursively splits on the 10M-block limit and 10,000-log cap and refuses silent truncation. [onchain.py](sleuth/onchain.py:29) |
+| VERIFIED | Receipt-level token extraction | Reuse after generalizing beyond a single ERC-20. Receipt caching and topic-emitter collection are useful primitives. [onchain.py](sleuth/onchain.py:310) |
+| VERIFIED | Block-time lookup | Reuse with explicit provenance. It validates returned block height before caching timestamps. [onchain.py](sleuth/onchain.py:153) |
+| VERIFIED | Three-valued verdict rules | Reuse. Triage, trace, and dev-history generally preserve `true / false / unknown` rather than converting incomplete evidence into a negative. [triage.py](sleuth/triage.py:69), [devhistory.py](sleuth/devhistory.py:26), [trace.py](sleuth/trace.py:253) |
+| VERIFIED | Launch-event collector | Reuse as chain-specific plugin logic. It records whether a launcher came from a launch event or only a candidate creation signer. [launch.py](sleuth/launch.py:12) |
 
 ### Must be refactored behind a stable collector interface
 
-**VERIFIED — `Client` mixes too many responsibilities.** It owns transport, retry policy, deadline, rate limiting, cache location, mutable errors, request accounting, and a private thread pool. [client.py](/Users/owner/sleuth/sleuth/client.py:52)
+**VERIFIED — `Client` mixes too many responsibilities.** It owns transport, retry policy, deadline, rate limiting, cache location, mutable errors, request accounting, and a private thread pool. [client.py](sleuth/client.py:52)
 
 Specific problems:
 
-- **VERIFIED —** `client.errors` is a shared mutable side channel. Callers compare its length to infer whether a receipt operation failed. Concurrent tasks can make that attribution unreliable. [client.py](/Users/owner/sleuth/sleuth/client.py:61), [devhistory.py](/Users/owner/sleuth/sleuth/devhistory.py:113)
-- **VERIFIED —** Triage reaches through the abstraction and submits work directly to `client._pool`. [triage.py](/Users/owner/sleuth/sleuth/triage.py:187), [triage.py](/Users/owner/sleuth/sleuth/triage.py:220)
-- **VERIFIED —** `Client` creates its own executor while triage and trace create additional executors. Concurrency and cancellation cannot be governed per job. [client.py](/Users/owner/sleuth/sleuth/client.py:64), [triage.py](/Users/owner/sleuth/sleuth/triage.py:118), [trace.py](/Users/owner/sleuth/sleuth/trace.py:165)
-- **VERIFIED —** `close(wait=False)` does not establish that background requests have stopped before a service job is finalized. [client.py](/Users/owner/sleuth/sleuth/client.py:347)
+- **VERIFIED —** `client.errors` is a shared mutable side channel. Callers compare its length to infer whether a receipt operation failed. Concurrent tasks can make that attribution unreliable. [client.py](sleuth/client.py:61), [devhistory.py](sleuth/devhistory.py:113)
+- **VERIFIED —** Triage reaches through the abstraction and submits work directly to `client._pool`. [triage.py](sleuth/triage.py:187), [triage.py](sleuth/triage.py:220)
+- **VERIFIED —** `Client` creates its own executor while triage and trace create additional executors. Concurrency and cancellation cannot be governed per job. [client.py](sleuth/client.py:64), [triage.py](sleuth/triage.py:118), [trace.py](sleuth/trace.py:165)
+- **VERIFIED —** `close(wait=False)` does not establish that background requests have stopped before a service job is finalized. [client.py](sleuth/client.py:347)
 - **VERIFIED —** Responses are untyped dictionaries with no schema or collector-version identifier.
 - **INFERRED —** Replace the side channel with a returned `CollectionResult` containing `items`, `coverage`, `gaps`, `source_attempts`, and `checkpoint`.
 
-**VERIFIED — configuration is process-oriented.** `load()` raises `SystemExit` and creates directories. `chain()` also raises `SystemExit`. Those are CLI semantics and inappropriate inside an API or worker. [config.py](/Users/owner/sleuth/sleuth/config.py:61), [config.py](/Users/owner/sleuth/sleuth/config.py:79)
+**VERIFIED — configuration is process-oriented.** `load()` raises `SystemExit` and creates directories. `chain()` also raises `SystemExit`. Those are CLI semantics and inappropriate inside an API or worker. [config.py](sleuth/config.py:61), [config.py](sleuth/config.py:79)
 
-**VERIFIED — `Watchlist` is not a service repository.** Every instance reads the entire global JSON file and atomically replaces it on save; concurrent processes can overwrite each other’s changes. `last_block` exists but has no monitoring loop. [watchlist.py](/Users/owner/sleuth/sleuth/watchlist.py:5), [watchlist.py](/Users/owner/sleuth/sleuth/watchlist.py:17), [watchlist.py](/Users/owner/sleuth/sleuth/watchlist.py:44)
+**VERIFIED — `Watchlist` is not a service repository.** Every instance reads the entire global JSON file and atomically replaces it on save; concurrent processes can overwrite each other’s changes. `last_block` exists but has no monitoring loop. [watchlist.py](sleuth/watchlist.py:5), [watchlist.py](sleuth/watchlist.py:17), [watchlist.py](sleuth/watchlist.py:44)
 
-**VERIFIED — the SQLite cursor table is unused.** It is created and has accessors, but current collection code does not use it to resume ranges. [client.py](/Users/owner/sleuth/sleuth/client.py:27), [client.py](/Users/owner/sleuth/sleuth/client.py:43)
+**VERIFIED — the SQLite cursor table is unused.** It is created and has accessors, but current collection code does not use it to resume ranges. [client.py](sleuth/client.py:27), [client.py](sleuth/client.py:43)
 
-**VERIFIED — orchestration currently mutates persistent state.** `triage.run` and `devhistory.run` read and save the watchlist; `trace` mutates it from the CLI. That prevents replaying a run as a pure calculation. [triage.py](/Users/owner/sleuth/sleuth/triage.py:115), [triage.py](/Users/owner/sleuth/sleuth/triage.py:449), [devhistory.py](/Users/owner/sleuth/sleuth/devhistory.py:53), [cli.py](/Users/owner/sleuth/sleuth/cli.py:189)
+**VERIFIED — orchestration currently mutates persistent state.** `triage.run` and `devhistory.run` read and save the watchlist; `trace` mutates it from the CLI. That prevents replaying a run as a pure calculation. [triage.py](sleuth/triage.py:115), [triage.py](sleuth/triage.py:449), [devhistory.py](sleuth/devhistory.py:53), [cli.py](sleuth/cli.py:189)
 
 ### The cache is less durable than advertised
 
-**VERIFIED —** `Cache.get` internally distinguishes cached values through metadata, but most public methods discard that metadata. [client.py](/Users/owner/sleuth/sleuth/client.py:33), [client.py](/Users/owner/sleuth/sleuth/client.py:269)
+**VERIFIED —** `Cache.get` internally distinguishes cached values through metadata, but most public methods discard that metadata. [client.py](sleuth/client.py:33), [client.py](sleuth/client.py:269)
 
-**VERIFIED —** `token()` silently combines cached identity with live supply and holder counts. The output does not identify which fields were cached. [client.py](/Users/owner/sleuth/sleuth/client.py:310)
+**VERIFIED —** `token()` silently combines cached identity with live supply and holder counts. The output does not identify which fields were cached. [client.py](sleuth/client.py:310)
 
-**VERIFIED —** Balances are live; block timestamps and receipts may be cached; callers are not given field-level provenance. [onchain.py](/Users/owner/sleuth/sleuth/onchain.py:153), [onchain.py](/Users/owner/sleuth/sleuth/onchain.py:274), [onchain.py](/Users/owner/sleuth/sleuth/onchain.py:319)
+**VERIFIED —** Balances are live; block timestamps and receipts may be cached; callers are not given field-level provenance. [onchain.py](sleuth/onchain.py:153), [onchain.py](sleuth/onchain.py:274), [onchain.py](sleuth/onchain.py:319)
 
-**VERIFIED —** Transaction bodies and receipts are cached as soon as they are returned. The code does not require `safe` or `finalized` status and does not store a canonical block hash for later reorg invalidation. [client.py](/Users/owner/sleuth/sleuth/client.py:327), [onchain.py](/Users/owner/sleuth/sleuth/onchain.py:325)
+**VERIFIED —** Transaction bodies and receipts are cached as soon as they are returned. The code does not require `safe` or `finalized` status and does not store a canonical block hash for later reorg invalidation. [client.py](sleuth/client.py:327), [onchain.py](sleuth/onchain.py:325)
 
-**VERIFIED —** Address “identity” is cached indefinitely even though verification status, tags, scam flags, proxy implementation, and names can change. [client.py](/Users/owner/sleuth/sleuth/client.py:280)
+**VERIFIED —** Address “identity” is cached indefinitely even though verification status, tags, scam flags, proxy implementation, and names can change. [client.py](sleuth/client.py:280)
 
-**VERIFIED —** `codes()` caches an EOA result for six hours. For incident response, that can hide a newly installed EIP-7702 delegation for up to six hours. It also stores only `eoa7702`, discarding the delegate target embedded after `0xef0100`. [onchain.py](/Users/owner/sleuth/sleuth/onchain.py:247)
+**VERIFIED —** `codes()` caches an EOA result for six hours. For incident response, that can hide a newly installed EIP-7702 delegation for up to six hours. It also stores only `eoa7702`, discarding the delegate target embedded after `0xef0100`. [onchain.py](sleuth/onchain.py:247)
 
 **INFERRED —** Service artifacts need explicit fields such as:
 
@@ -78,14 +78,14 @@ collector_version: str
 
 | Status | Path | Actual behavior |
 |---|---|---|
-| VERIFIED | `transfer_logs` | It accumulates split spans in a local list. A later `BudgetExceeded` throws the whole call away; completed spans and the next checkpoint are not returned. [onchain.py](/Users/owner/sleuth/sleuth/onchain.py:36) |
-| VERIFIED | Triage before flow stage | `triage.run` re-raises if `out["flow"]` is absent. The CLI converts that to `SystemExit`, so no evidence file is written. [triage.py](/Users/owner/sleuth/sleuth/triage.py:80), [cli.py](/Users/owner/sleuth/sleuth/cli.py:166) |
-| VERIFIED | Triage seller loop | Earlier sellers survive, but a seller whose acquisition scan times out disappears from that enrichment stage. The loop breaks after a generic gap. [triage.py](/Users/owner/sleuth/sleuth/triage.py:273) |
-| VERIFIED | Triage outer partial | After flow exists, the outer catch returns a partial run, but it does not persist watchlist mutations reached before the normal final `save()`. [triage.py](/Users/owner/sleuth/sleuth/triage.py:86), [triage.py](/Users/owner/sleuth/sleuth/triage.py:449) |
-| VERIFIED | `trace.wallet` | A timeout at any point discards that wallet’s entire partially built dictionary. `trace.group` preserves other wallets and adds a gap. [trace.py](/Users/owner/sleuth/sleuth/trace.py:39), [trace.py](/Users/owner/sleuth/sleuth/trace.py:165) |
-| VERIFIED | Trace executor shutdown | The executor context waits for submitted futures on exit. The nominal budget can therefore be exceeded while threads finish. [trace.py](/Users/owner/sleuth/sleuth/trace.py:165) |
-| VERIFIED | Dev-history | The current wallet is appended before its scans. A deadline may leave it present with `complete=True` even though its fields are only partly populated; the overall verdict is safely forced to `true` or `unknown`. [devhistory.py](/Users/owner/sleuth/sleuth/devhistory.py:14), [devhistory.py](/Users/owner/sleuth/sleuth/devhistory.py:93) |
-| VERIFIED | Burn/tx/contract | These commands have no command-specific `BudgetExceeded` recovery. A deadline can prevent `_save()` and produce no run artifact. [cli.py](/Users/owner/sleuth/sleuth/cli.py:164), [cli.py](/Users/owner/sleuth/sleuth/cli.py:225) |
+| VERIFIED | `transfer_logs` | It accumulates split spans in a local list. A later `BudgetExceeded` throws the whole call away; completed spans and the next checkpoint are not returned. [onchain.py](sleuth/onchain.py:36) |
+| VERIFIED | Triage before flow stage | `triage.run` re-raises if `out["flow"]` is absent. The CLI converts that to `SystemExit`, so no evidence file is written. [triage.py](sleuth/triage.py:80), [cli.py](sleuth/cli.py:166) |
+| VERIFIED | Triage seller loop | Earlier sellers survive, but a seller whose acquisition scan times out disappears from that enrichment stage. The loop breaks after a generic gap. [triage.py](sleuth/triage.py:273) |
+| VERIFIED | Triage outer partial | After flow exists, the outer catch returns a partial run, but it does not persist watchlist mutations reached before the normal final `save()`. [triage.py](sleuth/triage.py:86), [triage.py](sleuth/triage.py:449) |
+| VERIFIED | `trace.wallet` | A timeout at any point discards that wallet’s entire partially built dictionary. `trace.group` preserves other wallets and adds a gap. [trace.py](sleuth/trace.py:39), [trace.py](sleuth/trace.py:165) |
+| VERIFIED | Trace executor shutdown | The executor context waits for submitted futures on exit. The nominal budget can therefore be exceeded while threads finish. [trace.py](sleuth/trace.py:165) |
+| VERIFIED | Dev-history | The current wallet is appended before its scans. A deadline may leave it present with `complete=True` even though its fields are only partly populated; the overall verdict is safely forced to `true` or `unknown`. [devhistory.py](sleuth/devhistory.py:14), [devhistory.py](sleuth/devhistory.py:93) |
+| VERIFIED | Burn/tx/contract | These commands have no command-specific `BudgetExceeded` recovery. A deadline can prevent `_save()` and produce no run artifact. [cli.py](sleuth/cli.py:164), [cli.py](sleuth/cli.py:225) |
 
 **INFERRED —** Every range collector should checkpoint after each completed span. Deadlines should stop scheduling new work, return completed facts, and mark the exact uncollected range—never discard already collected evidence.
 
@@ -93,11 +93,11 @@ collector_version: str
 
 **INFERRED —** Keep these outside the service core:
 
-- Argument parsing, address validation, `_save`, and text output in [cli.py](/Users/owner/sleuth/sleuth/cli.py:24).
-- Markdown terminal reports in [report.py](/Users/owner/sleuth/sleuth/report.py:20).
+- Argument parsing, address validation, `_save`, and text output in [cli.py](sleuth/cli.py:24).
+- Markdown terminal reports in [report.py](sleuth/report.py:20).
 - File-based `enrich` and `watch` commands.
 - `scripts/pons_scan.py`.
-- The current `contract.audit` until it reports pagination and source completeness; it currently reads only one recent transaction page. [contract.py](/Users/owner/sleuth/sleuth/contract.py:7)
+- The current `contract.audit` until it reports pagination and source completeness; it currently reads only one recent transaction page. [contract.py](sleuth/contract.py:7)
 
 ---
 
@@ -129,7 +129,7 @@ That matches `from == victim` for both ERC-20 and ERC-721. Distinguish them by s
 
 The standards define those event layouts. [ERC-20](https://eips.ethereum.org/EIPS/eip-20), [ERC-721](https://eips.ethereum.org/EIPS/eip-721)
 
-**VERIFIED —** Current `transfer_logs` cannot do this: it always sets a token contract address and deliberately accepts only three-topic ERC-20-shaped logs. [onchain.py](/Users/owner/sleuth/sleuth/onchain.py:29)
+**VERIFIED —** Current `transfer_logs` cannot do this: it always sets a token contract address and deliberately accepts only three-topic ERC-20-shaped logs. [onchain.py](sleuth/onchain.py:29)
 
 **INFERRED —** Base query cost is approximately:
 
@@ -158,7 +158,7 @@ ERC-20 and ERC-721 share the `Approval` signature but have different event shape
 
 ### EIP-7702
 
-**VERIFIED —** The present code detects the `0xef0100` prefix but only returns `eoa7702`. [onchain.py](/Users/owner/sleuth/sleuth/onchain.py:250)
+**VERIFIED —** The present code detects the `0xef0100` prefix but only returns `eoa7702`. [onchain.py](sleuth/onchain.py:250)
 
 **INFERRED —** The collector must retain:
 
@@ -178,7 +178,7 @@ EIP-7702 defines the delegation indicator as `0xef0100 || address` and places au
 
 ### Native ETH drains
 
-**VERIFIED —** Top-level transactions and explorer-indexed internal transfers are already used separately. `trace.wallet` reads address transactions and internal transactions, while `txdecode` marks internal ETH unavailable when Blockscout fails. [trace.py](/Users/owner/sleuth/sleuth/trace.py:98), [txdecode.py](/Users/owner/sleuth/sleuth/txdecode.py:84)
+**VERIFIED —** Top-level transactions and explorer-indexed internal transfers are already used separately. `trace.wallet` reads address transactions and internal transactions, while `txdecode` marks internal ETH unavailable when Blockscout fails. [trace.py](sleuth/trace.py:98), [txdecode.py](sleuth/txdecode.py:84)
 
 **INFERRED —** Detection tiers should be:
 
@@ -659,8 +659,8 @@ Cut from MVP:
 1. **Stable collection boundary**
 
    - Add `sleuth/collectors/types.py`, `context.py`, `rpc.py`, `logs.py`, `facts.py`.
-   - Refactor [client.py](/Users/owner/sleuth/sleuth/client.py:52) to return scoped results rather than mutate `errors`.
-   - Refactor [config.py](/Users/owner/sleuth/sleuth/config.py:61) to raise typed errors and perform no directory creation.
+   - Refactor [client.py](sleuth/client.py:52) to return scoped results rather than mutate `errors`.
+   - Refactor [config.py](sleuth/config.py:61) to raise typed errors and perform no directory creation.
    - Preserve `flows.py` as the deterministic analysis kernel.
 
 2. **Make investigations replayable**
@@ -678,7 +678,7 @@ Cut from MVP:
 
 4. **Real monitoring**
 
-   - Replace [watchlist.py](/Users/owner/sleuth/sleuth/watchlist.py:17) with database subscriptions and checkpoints.
+   - Replace [watchlist.py](sleuth/watchlist.py:17) with database subscriptions and checkpoints.
    - Implement provisional and finalized cursors, reorg reconciliation, health/lag display, and notification outbox.
    - Require a paid production RPC before calling monitoring active.
 

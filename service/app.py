@@ -152,17 +152,25 @@ def drain_form(request: Request):
     return render("screen.html", request, kind="drain", error=None)
 
 
+@app.get("/tx", response_class=HTMLResponse)
+def tx_form(request: Request):
+    return render("screen.html", request, kind="tx", error=None)
+
+
+KINDS = ("rug", "drain", "tx")
+
+
 @app.post("/screen")
 def screen_create(request: Request, kind: str = Form(...), subject: str = Form(...), email: str = Form(""), incident_ts: str = Form(""), claimed_loss: str = Form(""),
                   when: str = Form(""), incident_local: str = Form("")):
     if not SCREEN_BRAKE.hit(client_ip(request)):
-        return render("screen.html", request, kind=kind if kind in ("rug", "drain") else "rug", error="too many screens from this address in the last hour")
+        return render("screen.html", request, kind=kind if kind in KINDS else "rug", error="too many screens from this address in the last hour")
     try:
         ts, hours_after = plain.incident_time(incident_ts, when, incident_local, "America/Los_Angeles")
         cid, tok = cases.create(conn(), kind, chain_id(), subject, email=email.strip()[:200] or None, incident_ts=ts, claimed_loss=claimed_loss.strip()[:100] or None,
                                 hours_after=hours_after)
     except (ValueError, db.DbError) as e:
-        return render("screen.html", request, kind=kind if kind in ("rug", "drain") else "rug", error=str(e))
+        return render("screen.html", request, kind=kind if kind in KINDS else "rug", error=str(e))
     return RedirectResponse(f"/c/{cid}?k={tok}", status_code=303)
 
 
@@ -189,11 +197,12 @@ def _workspace(case_id, evidence_limit=200):
 def case_page(request: Request, case_id: str, k: str = ""):
     case = _case_or_404(case_id, k)
     runs, asr, ev, subs, pays = _workspace(case_id)
-    results = [(r, db.loads(r["result_json"])) for r in runs]
+    results = [(r, db.loads(r["result_json"])) for r in reversed(runs)]      # newest first: the template reads runs[0] as the latest
     entitled = any(p["state"] in ("settled", "entitled") for p in pays)
-    done = [res for r, res in results if r["kind"] in ("rug_screen", "drain_screen") and res]
+    done = [res for r, res in results if r["kind"] in ("rug_screen", "drain_screen", "tx_explain") and res]
+    inv = [res for r, res in results if r["kind"] == "drain_investigation" and res]   # the drain follow-up adds mechanism + destinations
     return render("case.html", request, case=case, k=k, runs=results, assertions=asr, evidence=ev, subs=subs, payments=pays, entitled=entitled,
-                  checkout_enabled=bool(manual.receive_address()), plain_summary=plain.summary(case, done[-1] if done else None, asr))
+                  checkout_enabled=bool(manual.receive_address()), plain_summary=plain.summary(case, done[0] if done else None, asr, investigation=inv[0] if inv else None))
 
 
 @app.post("/c/{case_id}/checkout")

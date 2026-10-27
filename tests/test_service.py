@@ -307,7 +307,85 @@ def _fake_run_job(cfg, kind, payload, budget_s=None):
     if kind == "rug_deep":
         return "succeeded", {"token": payload["token"], "complete": True, "checked_through": 124, "gaps": [], "dev_history": {"dev": OTHER, "dev_ever_sold": True, "history_complete": True, "summary": "fake"},
                              "trace": {"verdict": {"direct_tx_connection": False, "shared_funding": None}}}
-    return "partial", {"victim": payload["victim"], "complete": False, "gaps": [{"kind": "x", "detail": "y"}], "predicates": {"transfer_event_from_victim": True}, "causal": {"drain_cause": {"reason": "unknown"}}, "events": []}
+    if kind == "drain_investigation":
+        inv = {"rule_version": "drain-investigation/0.1", "victim": payload["victim"], "presence": {"1": {"tx": 3, "transfers": 2, "name": "Ethereum", "seen": True}, "4663": {"tx": 0, "transfers": 0, "name": "Robinhood Chain", "seen": False}},
+               "chains": [{"chain_id": "1", "name": "Ethereum", "explorer": "https://x", "pages_complete": True, "oldest_read": None, "outflow_txs": 1, "outflows_fetched_all": True,
+                           "mechanisms": [], "losses": [{"tx": "0x" + "1" * 64, "ts": "2026-10-23T19:47:35.000000Z", "mechanism": "eip7702_sweep", "submitter": OTHER, "recipients": [OTHER],
+                                                         "evidence": "authorization signed by this account", "outflows": [{"symbol": "USDC", "raw": "1000000000", "decimals": 6, "canonical": True}],
+                                                         "authorizations": [{"delegate": "0x" + "7" * 40, "nonce": 5}], "after_credit_s": 60, "tie_reason": None}],
+                           "loss_totals": {"usdc": {"symbol": "USDC", "raw": "1000000000", "decimals": 6, "canonical": True, "n": 1}},
+                           "quarantine": [], "quarantine_total": 0, "profile": {"protocols": [], "approvals": []},
+                           "earlier_third_party": [{"tx": "0x" + "8" * 64, "ts": "2026-10-17T09:17:59.000000Z", "mechanism": "permit_signature_used", "submitter": "0x" + "e" * 40,
+                                                    "before_reported_incident": True, "recipients": ["0x" + "f" * 40],
+                                                    "outflows": [{"symbol": "USDC", "raw": "10000000000", "decimals": 6, "canonical": True}]}],
+                           "earlier_totals": {"usdc": {"symbol": "USDC", "raw": "10000000000", "decimals": 6, "canonical": True, "n": 1}},
+                           "third_party_self_authorised": [{"tx": "0x" + "9" * 64, "ts": "2026-10-22T09:05:00.000000Z", "mechanism": "allowance_used_by_spender", "submitter": "0x" + "d" * 40,
+                                                            "self_authorised": True, "self_authorised_reason": "5 min after this wallet's own approval of exactly this amount", "before_reported_incident": True,
+                                                            "outflows": [{"symbol": "USDC", "raw": "70000000", "decimals": 6, "canonical": True}]}],
+                           "current_delegation": {"known": True, "delegated": True, "delegate": "0x" + "7" * 40, "label": None, "verified": False, "is_scam": False, "code_len": 2846,
+                                                  "set_in_loss_tx": "0x" + "1" * 64, "set_by": OTHER}}],
+               "suspects": [{"addr": OTHER, "chain_id": "1", "kind": "eoa", "label": None, "loss_txs": 1, "tx_count": 82, "complete": True, "type4_submitted": 1, "type4_fetched": 1,
+                             "other_authorities": 8, "authorities_sample": ["0x" + "5" * 40], "delegates": [], "swept_in": {}, "holds": {}, "balances_read": True,
+                             "outbound": [{"addr": "0x" + "6" * 40, "kind": "privacy_pool", "label": "Railgun: Relay Adapt", "n": 1, "native_raw": "1000000000000000000", "assets": {}, "last": None}],
+                             "first_funding": None, "notes": []}],
+               "relations": [], "gaps": [], "complete": True, "observed_at": 1793077200.0,
+               "delegations": {"1": {"known": True, "delegated": True, "delegate": "0x" + "7" * 40, "verified": False, "set_in_loss_tx": "0x" + "1" * 64, "set_by": OTHER}, "4663": {"known": True, "delegated": False}},
+               "verdict": {"assets_left_wallet": True, "eip7702_authorization_by_wallet_submitted_by_other": True, "wallet_key_signed_outflow": False,
+                           "wallet_currently_delegated": True, "recipient_sent_to_exchange_bridge_or_privacy_pool": True, "other_wallets_authorized_to_same_submitter": True}}
+        return "succeeded", {"job": kind, "victim": payload["victim"], "chain_id": payload["chain_id"], "complete": True, "checked_through": 126, "gaps": [], "investigation": inv}
+    if kind == "tx_explain":
+        return "succeeded", {"job": kind, "tx": payload["tx"], "chain_id": payload["chain_id"], "complete": True, "checked_through": 127, "gaps": [],
+                             "explain": {"rule_version": "drain-investigation/0.1", "found": True, "type": "4", "ts": "2026-10-23T19:47:35.000000Z", "block": 100, "status": "ok", "submitter": OTHER, "to": "0x" + "c" * 40,
+                                         "method": "aggregate3", "authorizations": [{"authority": VICTIM, "delegate": "0x" + "7" * 40, "nonce": 5}],
+                                         "token_transfers": [{"from": VICTIM, "to": OTHER, "token": "0x" + "a" * 40, "symbol": "USDC", "raw": "1000000000", "decimals": 6, "canonical": True, "suspicious": False}],
+                                         "accounts": [{"account": VICTIM, "mechanism": "eip7702_sweep", "evidence": "authorization signed by this account", "outflows": [{"symbol": "USDC", "raw": "1000000000", "decimals": 6}], "recipients": [OTHER]}],
+                                         "limits": "one transaction shows the mechanism, not the cause", "complete": True, "gaps": []}}
+    return "partial", {"victim": payload["victim"], "complete": False, "gaps": [{"kind": "x", "detail": "y"}], "predicates": {"transfer_event_from_victim": True},
+                       "causal": {"drain_cause": {"reason": "unknown"}}, "events": [], "window": {"from_block": 100, "to_block": 126}}
+
+
+def test_drain_follow_up_investigation_and_delegation_warning(web, conn, monkeypatch):
+    from service import worker as W
+    monkeypatch.setattr(W, "run_job", _fake_run_job)
+    r = web.post("/screen", data={"kind": "drain", "subject": VICTIM, "when": "today"}, follow_redirects=False)
+    path, q = r.headers["location"].split("?")
+    w = W.Worker(conn=conn, cfg={})
+    assert w.run_one() and w.run_one() and not w.run_one()
+    assert [r[0] for r in conn.execute("SELECT kind FROM investigation_runs ORDER BY created_at").fetchall()] == ["drain_screen", "drain_investigation"]
+    v = {r["predicate"]: r["verdict"] for r in conn.execute("SELECT predicate, verdict FROM assertions")}
+    assert v["wallet_currently_delegated"] == "YES" and v["eip7702_authorization_by_wallet_submitted_by_other"] == "YES" and v["wallet_key_signed_outflow"] == "no"
+    page = web.get(path + "?" + q).text
+    assert "Still delegated when checked" in page and "Revoking token approvals does not undo a delegation" in page
+    assert "eip7702 sweep" in page and "privacy pool" in page and "8</b> other wallet(s)" in page
+    assert "STILL delegated" in page and "when checked (2026-10-27 05:00 UTC)" in page      # plain-language layer repeats the warning, dated
+    assert page.count("set in loss transaction") >= 2 and "it is the open door" in page       # red box and plain words both name the origin
+    assert "1 third-party move(s) that followed this wallet's own exact-amount approval (listed, not counted as loss)" in page   # table
+    assert "1 third-party move(s) followed this wallet&#39;s own exact-amount approval" in page                                   # plain words (escaped)
+    assert "Nothing was checked" not in page
+    assert "1 third-party move(s) more than an hour before the reported time" in page and "Earlier total: 10000.000000 USDC" in page
+    assert "run the screen again with an earlier time" in page
+    pkg = web.get(path + "/export.json?k=" + q.split("=")[1]).json()
+    assert any(a["predicate"] == "wallet_currently_delegated" for a in pkg["assertions"])
+
+
+def test_tx_case_validation_and_explainer_page(web, conn, monkeypatch):
+    from service import worker as W
+    monkeypatch.setattr(W, "run_job", _fake_run_job)
+    with pytest.raises(ValueError):
+        cases.create(conn, "tx", 1, VICTIM)                 # an address is not a transaction hash
+    r = web.post("/screen", data={"kind": "tx", "subject": "0x1234"}, follow_redirects=False)
+    assert r.status_code == 200 and "64 hex characters" in r.text and "Transaction hash" in r.text    # form re-rendered with the error
+    assert "Transaction hash" in web.get("/tx").text and "/tx" in web.get("/").text
+    h = "0x" + "1" * 64
+    r = web.post("/screen", data={"kind": "tx", "subject": h}, follow_redirects=False)
+    assert r.status_code == 303
+    path, q = r.headers["location"].split("?")
+    assert W.Worker(conn=conn, cfg={}).run_one()
+    v = {r["predicate"]: r["verdict"] for r in conn.execute("SELECT predicate, verdict FROM assertions")}
+    assert v["eip7702_authorization_in_tx"] == "YES" and v["assets_left_accounts"] == "YES"
+    page = web.get(path + "?" + q).text
+    assert "Transaction explainer" in page and "Authorizations carried" in page and "EIP-7702" in page and "eip7702 sweep" in page
+    assert web.post(path + "/checkout", data={"k": q.split("=")[1]}).status_code == 400
 
 
 def test_web_end_to_end(web, conn, monkeypatch):
@@ -556,3 +634,22 @@ def test_plain_language_layer_and_incident_time_form(web, conn, monkeypatch):
     from service import cases as C
     cid, _ = C.create(conn, "drain", 4663, VICTIM, hours_after=0)
     assert json.loads(conn.execute("SELECT result_json FROM investigation_runs WHERE case_id=? ORDER BY created_at DESC LIMIT 1", (cid,)).fetchone()[0])["input"]["hours_after"] == 1
+
+
+def test_tx_case_provider_failure_is_not_reported_as_unknown_hash(web, conn, monkeypatch):
+    """A failed explorer read must render as 'could not read', never as 'no such transaction'."""
+    from service import plain
+    from service import worker as W
+
+    def failing(cfg, kind, payload, budget_s):
+        ex = {"rule_version": "drain-investigation/0.1", "found": False, "chain_id": payload["chain_id"], "accounts": [], "complete": False,
+              "gaps": [{"kind": "provider", "detail": "the explorer failed to answer for this hash: 502"}]}
+        return "partial", {"job": kind, "tx": payload["tx"], "chain_id": payload["chain_id"], "complete": False, "checked_through": None, "gaps": ex["gaps"], "explain": ex}
+    monkeypatch.setattr(W, "run_job", failing)
+    r = web.post("/screen", data={"kind": "tx", "subject": "0x" + "ab" * 32, "chain_id": "1"}, follow_redirects=False)
+    assert r.status_code == 303
+    path, q = r.headers["location"].split("?")
+    assert W.Worker(conn=conn, cfg={}).run_one()
+    page = web.get(path + "?" + q).text
+    assert "failed to answer for this hash" in page and "has no confirmed transaction" not in page
+    assert plain.summary({"kind": "tx"}, {"explain": {"found": False, "gaps": [{"kind": "not_found"}]}}, [])[0].startswith("The explorer does not know")
