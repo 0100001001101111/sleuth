@@ -23,6 +23,11 @@ from collections import defaultdict
 ZERO = "0x0000000000000000000000000000000000000000"
 
 
+def norm(a):
+    """Hex addresses are case-insensitive (lowercase them); base58 (Solana) addresses are case-sensitive."""
+    return a.lower() if isinstance(a, str) and a.startswith('0x') else a
+
+
 def detect_pools(records, code_lookup, known=(), min_txs=3, max_cands=40, swap_check=None):
     """Pools = contracts that both RECEIVE tokens (net, in >= min_txs txs) and SEND tokens (net, in >= min_txs txs):
     a venue trades both ways. One-directional sinks (staking, lockers, fee splitters, distributors, burners) are NOT
@@ -40,20 +45,20 @@ def detect_pools(records, code_lookup, known=(), min_txs=3, max_cands=40, swap_c
         for a, v in net.items():
             if v:
                 hits[a][0 if v > 0 else 1] += 1
-    known_lc = {a.lower() for a in known}
+    known_lc = {norm(a) for a in known}
     cands = sorted((a for a, (i, o) in hits.items() if i >= min_txs and o >= min_txs), key=lambda a: -sum(hits[a]))[:max_cands]
     one_way = sorted((a for a, (i, o) in hits.items() if a not in cands and a not in known_lc
                       and max(i, o) >= min_txs and min(i, o) == 0),
                      key=lambda a: -sum(hits[a]))[:max_cands]
     kinds = code_lookup(cands + one_way) if (cands or one_way) else {}
-    pools = {a.lower() for a in known}
+    pools = set(known_lc)
     pools |= {a for a in cands if kinds.get(a) == "contract"}
     if swap_check:
         # one-way contracts are venues only with independent swap-event evidence, never on flow shape alone
         ow_contracts = [a for a in one_way if kinds.get(a) == "contract"]
         if ow_contracts:
             pools |= set(swap_check(ow_contracts)) & set(ow_contracts)
-    tracked = set(cands) | set(one_way) | ({a.lower() for a in known} & set(hits))
+    tracked = set(cands) | set(one_way) | (known_lc & set(hits))
     return pools, {a: tuple(hits[a]) for a in tracked}, kinds
 
 
