@@ -8,6 +8,11 @@ Transfer events only exist for successful txs, so failed swaps never appear here
 from collections import defaultdict
 
 
+def norm(a):
+    """Hex addresses are case-insensitive (lowercase them); base58 (Solana) addresses are case-sensitive."""
+    return a.lower() if isinstance(a, str) and a.startswith('0x') else a
+
+
 def detect_pools(records, code_lookup, known=(), min_txs=3, max_cands=40):
     """Pools = contracts that both RECEIVE tokens (net, in >= min_txs txs) and SEND tokens (net, in >= min_txs txs):
     a venue trades both ways. One-directional sinks (staking, lockers, fee splitters, distributors, burners) are NOT
@@ -25,7 +30,7 @@ def detect_pools(records, code_lookup, known=(), min_txs=3, max_cands=40):
                 hits[a][0 if v > 0 else 1] += 1
     cands = sorted((a for a, (i, o) in hits.items() if i >= min_txs and o >= min_txs), key=lambda a: -sum(hits[a]))[:max_cands]
     kinds = code_lookup(cands) if cands else {}
-    pools = {a.lower() for a in known}
+    pools = {norm(a) for a in known}
     pools |= {a for a in cands if kinds.get(a) == "contract"}
     return pools, {a: tuple(hits[a]) for a in cands}, kinds
 

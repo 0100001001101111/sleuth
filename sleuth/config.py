@@ -21,11 +21,21 @@ DEFAULT = {
                 "topic": "0xdcacba5e347ae7abd91cb519eb877af8fa7774e347b85dd3ddcd24a2ba8cdf37",
                 "token_topic": 1, "market_topic": 2, "launcher_topic": 3,
             }],
+        },
+        "solana": {
+            "name": "Solana",
+            "explorer": "https://solscan.io",
+            "rpc": "https://api.mainnet-beta.solana.com",
+            "tz": "America/Los_Angeles",
+            # Raydium v4 vault authority: its token accounts are the AMM's reserves. pump.fun curve + PumpSwap/Raydium
+            # pools are recognised by their owning program at run time.
+            "known_pools": ["5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1"],
+            "rpc_rate": 2, "rpc_burst": 8,  # public node: ~10 getTransaction per 5 s per IP, then 429
         }
     },
     "default_chain": "4663",
     "http": {"timeout": 20, "retries": 2, "concurrency": 6},
-    "budgets": {"triage": 20, "trace": 70},
+    "budgets": {"triage": 20, "trace": 70, "launchdump": 40, "solana_triage": 240, "solana_launchdump": 240, "mint": 60},
     # Services: evidence of a shared funding *service*, never of a shared owner.
     "known_services": {
         "0xf70da97812cb96acdf810712aa562db8dfa3dbef": "Relay bridge solver",

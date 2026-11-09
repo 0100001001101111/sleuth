@@ -4,18 +4,20 @@
   sleuth trace ADDR[,ADDR..] --token TOKEN [--dev ADDR,..] [--budget 70]
   sleuth burn TX_HASH [--token TOKEN]      |  sleuth burn TOKEN --window 24h
   sleuth contract ADDR
+  sleuth launchdump TOKEN [--blocks 3000] [--first-blocks 3] [--from-block N]
   sleuth watch TOKEN [add ADDR ROLE "reason" [--tx HASH]]
 Every command writes full JSON evidence to ~/sleuth/data/runs/ and prints a short summary.
 """
 import argparse, json, re, sys, time
 from pathlib import Path
-from . import config as C, triage as T, trace as R, burn as B, contract as K, report
+from . import config as C, triage as T, trace as R, burn as B, contract as K, launchdump as L, solana as S, report
 from .client import Client, BudgetExceeded, ApiError
 from .onchain import RpcError
 from .watchlist import Watchlist
 
 ADDR = re.compile(r"^0x[0-9a-fA-F]{40}$")
 TXH = re.compile(r"^0x[0-9a-fA-F]{64}$")
+B58 = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
 def _window(s):
@@ -49,6 +51,8 @@ def main(argv=None):
     b = sub.add_parser("trace"); b.add_argument("addrs"); b.add_argument("--token", required=True); b.add_argument("--dev"); b.add_argument("--budget", type=float)
     c = sub.add_parser("burn"); c.add_argument("target"); c.add_argument("--token"); c.add_argument("--window", default="24h")
     d = sub.add_parser("contract"); d.add_argument("addr")
+    e = sub.add_parser("launchdump"); e.add_argument("token"); e.add_argument("--blocks", type=int, default=3000)
+    e.add_argument("--first-blocks", type=int, default=3); e.add_argument("--from-block", type=int)
     w = sub.add_parser("watch"); w.add_argument("token"); w.add_argument("rest", nargs="*"); w.add_argument("--tx")
     ns = ap.parse_args(argv)
     cfg = C.load()
@@ -63,6 +67,8 @@ def main(argv=None):
         print(json.dumps(wl.data, indent=1))
         return 0
 
+    if str(ns.chain or cfg["default_chain"]) == "solana":
+        return _solana(ns, cfg)
     budget = getattr(ns, "budget", None) or cfg["budgets"].get(ns.cmd if ns.cmd in ("triage", "trace") else "trace")
     cl = Client(cfg, ns.chain, budget_s=budget)
     try:
@@ -105,6 +111,14 @@ def main(argv=None):
         elif ns.cmd == "contract":
             out = K.audit(cl, ns.addr)
             text = report.contract(out, cl)
+        elif ns.cmd == "launchdump":
+            if not ADDR.match(ns.token):
+                raise SystemExit("token must be an address")
+            try:
+                out = L.run(cl, ns.token, ns.blocks, ns.first_blocks, ns.from_block)
+            except (RpcError, ApiError) as e:
+                raise SystemExit(f"RPC failure, no result (NOT 'no dump'): {e}")
+            text = report.launchdump(out, cl)
         out["requests"] = cl.requests
         out["errors"] = cl.errors[:10]
         p = _save(ns.cmd, out)
@@ -116,6 +130,37 @@ def main(argv=None):
         return 0
     finally:
         cl.close()
+
+
+def _solana(ns, cfg):
+    """Solana commands (public RPC only): triage, launchdump, contract (= mint check). trace/burn: not yet."""
+    if ns.cmd not in ("triage", "launchdump", "contract"):
+        raise SystemExit(f"{ns.cmd} is not supported on Solana yet (triage, launchdump, contract are)")
+    target = ns.token if ns.cmd in ("triage", "launchdump") else ns.addr
+    if not B58.match(target):
+        raise SystemExit("Solana mint must be a base58 address")
+    budget = getattr(ns, "budget", None) or cfg["budgets"].get({"triage": "solana_triage", "launchdump": "solana_launchdump", "contract": "mint"}[ns.cmd], 90)
+    cl = S.SolClient(cfg, budget_s=budget)
+    try:
+        if ns.cmd == "triage":
+            out = S.triage(cl, target, _window(ns.window), [a for a in (ns.track or "").split(",") if a], [a for a in (ns.dev or "").split(",") if a])
+            text = report.sol_triage(out, cl)
+        elif ns.cmd == "launchdump":
+            out = S.launchdump(cl, target, ns.blocks, ns.first_blocks)
+            text = report.launchdump(out, cl)
+        else:
+            out = S.mint_check(cl, target)
+            text = report.sol_mint(out, cl)
+    except BudgetExceeded:
+        raise SystemExit("budget exhausted before a result; retry with --budget or a smaller window")
+    out["requests"], out["errors"] = cl.requests, cl.errors[:10]
+    p = _save("solana_" + ns.cmd, out)
+    if ns.json:
+        print(json.dumps(out, indent=1, default=str))
+    else:
+        print(text)
+        print(f"\n[evidence: {p}]")
+    return 0
 
 
 if __name__ == "__main__":

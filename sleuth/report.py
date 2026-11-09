@@ -114,3 +114,74 @@ def contract(out, client):
         L.append(f"- {c['method']} by {short(c['from'])} at {local(c['ts'], client.chain.get('tz','UTC'))} [tx]({client.link('tx', c['tx'])})")
     L.append(f"- [contract]({client.link('address', out['addr'])}?tab=contract)")
     return "\n".join(L)
+
+
+def launchdump(out, client):
+    if out.get("summary") and out.get("launch_dump") is None and not out.get("early_buyers"):
+        return out["summary"]
+    tz = client.chain.get("tz", "UTC")
+    dec = (out.get("token_meta") or {}).get("decimals", 18)
+    fmt = lambda v: f"{v / 10 ** dec:,.0f}"
+    pct = lambda x: "?" if x is None else f"{100 * x:.1f}%"
+    v = out.get("launch_dump")
+    head = {True: "**LAUNCH DUMP: yes.**", False: "**Launch dump: not seen.**", None: "**Launch dump: unknown (incomplete).**"}[v]
+    lines = [f"{head} First {out['first_blocks']} blocks: {len(out['early_buyers'])} buyers took {pct(out['share_bought'])} of supply "
+             f"({fmt(out['early_total'])}); {pct(out['dumped_fraction'])} of that was sold inside the window "
+             f"({fmt(out['sold_direct'])} directly, {fmt(out['sold_via_hub'])} via {len(out['hubs'])} hub contract(s))."]
+    t = out.get("times") or {}
+    if out.get("bundled"):
+        lines.append(f"- **BUNDLED LAUNCH:** {out['bundle_wallets']} non-launcher wallets took {pct(out['bundle_share'])} of supply in the first "
+                     f"{out['first_blocks']} blocks" + (" and had not sold inside the window (overhang)." if not v else "."))
+    if out.get("first_sell_block") is not None:
+        lines.append(f"- First sell {out['blocks_to_first_sell']} blocks after launch ({local(t.get('first_sell'), tz)}); "
+                     f"hub sells: {out['hub_sell_txs']} txs from {out['hub_sellers']} distinct sender wallets.")
+    for h in out["hubs"]:
+        lines.append(f"- Hub {short(h['addr'])}: received {fmt(h['received'])} from {h['from_n']} early buyers [addr]({client.link('address', h['addr'])})")
+    for b in out["early_buyers"][:8]:
+        tag = " (launcher)" if b["is_launcher"] else ""
+        lines.append(f"- Early buyer {short(b['addr'])}{tag}: {fmt(b['amount'])} ({b['pct_supply']}% supply), {b['kind']}")
+    lines.append(f"- Window blocks {out['creation_block']}-{out['end_block']} ({local(t.get('creation'), tz)} -> {local(t.get('end'), tz)}); "
+                 f"{out['coverage']['transfers']} transfers; {client.requests} requests.")
+    for g in out.get("gaps") or []:
+        lines.append(f"- gap: {g}")
+    return "\n".join(lines)
+
+
+def sol_triage(out, client):
+    if out.get("summary") and not out.get("flow"):
+        return out["summary"]
+    tz = client.chain.get("tz", "UTC")
+    cov, fl = out["coverage"], out["flow"]
+    dev = out.get("dev_selling") or []
+    head = ("**Dev-linked selling in window: " + ", ".join(f"{short(d['addr'])} sold {d['sold']:,.0f} ({d['pct_supply']}%)" for d in dev) + ".**") if dev else \
+        ("**Dev-linked selling in window: none.**" if (out.get("launch") or {}).get("launcher") else "**Dev-linked selling: launcher unknown (pass --dev).**")
+    lines = [head + (f" launcher {short(out['launch']['launcher'])}" if (out.get("launch") or {}).get("launcher") else "")]
+    lines.append(f"- Window {local(cov['from_time'], tz)} -> {local(cov['to_time'], tz)}: sold {fl['sold']:,.0f} by {fl['sellers']} wallets / "
+                 f"bought {fl['bought']:,.0f} by {fl['buyers']}; {cov['txs']} txs read; pools {len(cov['pools'])}.")
+    for s_ in out.get("top_sellers") or []:
+        lines.append(f"- Seller {short(s_['addr'])}{' (dev-linked)' if s_['dev_linked'] else ''}: {s_['sold']:,.0f} ({s_['pct_supply']}% supply), "
+                     f"{len(s_['sell_txs'])} sell txs, +{s_['sol_proceeds']} SOL, bought in window {s_['bought_in_window']:,.0f}")
+    auth = out.get("authorities") or {}
+    lines.append(f"- Mint authority {'SET ' + short(auth['mint']) if auth.get('mint') else 'revoked'}; freeze authority "
+                 f"{'SET ' + short(auth['freeze']) if auth.get('freeze') else 'revoked'}; top-10 wallet holders "
+                 f"{str(out.get('top10_wallet_pct')) + '%' if out.get('holders') else 'unavailable'} of supply.")
+    for h in (out.get("holders") or [])[:5]:
+        lines.append(f"- Holder {short(h['owner'] or h['token_account'])}: {h['pct_supply']}% ({h['kind']})")
+    lines.append(f"- {client.requests} requests, {out['timing'].get('total_s')}s; coverage complete: {cov['complete']}.")
+    for g in out.get("gaps") or []:
+        lines.append(f"- gap: {g}")
+    return "\n".join(lines)
+
+
+def sol_mint(out, client):
+    if out.get("summary") and not out.get("holders"):
+        return out["summary"]
+    m = out["token_meta"]
+    lines = [f"**Mint {short(out['token'])}**: supply {m['total_supply'] / 10 ** m['decimals']:,.0f}, decimals {m['decimals']}; "
+             f"flags: {', '.join(out['flags']) or 'none (authorities revoked, classic token program)'}."]
+    lines.append(f"- Top-10 wallet holders {out['top10_wallet_pct']}% of supply; bonding curve {short(out['bonding_curve'])}.")
+    for h in out["holders"][:10]:
+        lines.append(f"- {short(h['owner'] or h['token_account'])}: {h['pct_supply']}% ({h['label'] or h['kind']}) [acct]({client.link('account', h['owner'] or h['token_account'])})")
+    for g in out.get("gaps") or []:
+        lines.append(f"- gap: {g}")
+    return "\n".join(lines)
