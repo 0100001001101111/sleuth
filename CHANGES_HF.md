@@ -47,3 +47,20 @@ Limits: holders (`getTokenLargestAccounts`) are throttled globally on the public
 "unavailable" (a free indexer key would fix it: Bo's call); signatures come from the mint, so plain wallet-to-wallet
 transfers after graduation can be missed (reported as a gap); busy coins read only the newest 120 transactions in
 `triage` (coverage marked incomplete). trace/burn/watch are not on Solana yet. Tests: `tests/test_solana.py`.
+
+## 2026-11-09: committed to Bo's repo on a fund branch, ported onto the new upstream main
+Upstream `main` was rewritten on Bo's laptop (same first four commits under new hashes) and gained seven commits on
+2026-10-22 (fail-closed verdicts, 4-5x faster triage, swap-event evidence, dev fee-claim / launch-farm / typo /
+bot-controller checks, `dev-history`, `tx`, `enrich`), plus a WIP branch `feat/incident-service` (10-27). The local
+history had no common ancestor with it, so the fund work went in two steps:
+- `hf/launchdump-solana` (ba590ba): the 10-21 fund changes exactly as validated, on top of the old local main.
+- `hf/launchdump-solana-upstream` (a509c39): the same change rebased onto upstream `ac17154`. Conflicts resolved in
+  `cli.py` (both command sets kept: dev-history/tx/enrich AND launchdump/solana) and `flows.py` (upstream one-way
+  venue detection kept; `norm()` applied to known pools so Solana base58 keys are not lowercased). Suite: 64 pass
+  (53 upstream + 11 fund). Live re-check through the fund wiring on DMN reproduced the 10-21 result exactly (29.0%
+  bought in the first 3 blocks, 96.6% sold via hub 0xb069…1214, 25 txs from 25 callers) and now also shows the new
+  upstream dev-profile lines (1.122 ETH of creator-fee claims, GasliteDrop launch-farm funding).
+The working clone now sits on `hf/launchdump-solana-upstream`. Policy is rule H5 in `~/hedge-fund/AGENTS.md`: fund
+branches `hf/<topic>`, never `main`, rebase on `origin/main` before a push, merging into `main` is Bo's call.
+Fund side: `python -m fund coins look --address ADDR …` now runs sleuth BY DEFAULT (`--no-sleuth` is the recorded
+opt-out), and `tools/sleuth/` is git-ignored by the fund repo.
